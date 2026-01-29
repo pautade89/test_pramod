@@ -131,4 +131,11 @@ Now In CNB_Validation file, Compare the data of df_ar_cnb_es table df_br_cnb_es 
 Also do the same for CCMS_Validation excel file and CNB_Validation file.
 Dont reply, just understand the context. Do not give any code right now. Just prepare it. When I ask then give me. Just reply "Understood".
 
+Context 8:
+As you know, the folder structure right?
+So, If cnb_in_out_*.tar file is present in After_Run then generate the CNB_Validation file.and same for CCMS and CMS Validation file.
+If cnb_in_out_*.tar is absent & both lgd_ccms_in_out_*.tar and lgd_commercial_in_out_*.tar are present in After_Run folder then script should generate CCMS and CMS validation excel file. So those tar file present in After_Run folder those excel file should be generate. Those tar files are absent then only print in terminal that this {tar file} tar is absent in After_Run Folder so {_Validation.xlsx} excel file is not generated.
 
+Also You are comparing the data, right? so if data is not match then you are highlighing the cell in light yellow colour, right? And If data is match then highlight the cell colour as light greeen.
+
+Also try to make border for every table if possible.
