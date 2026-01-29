@@ -1,0 +1,134 @@
+Context 1:
+Folder Structure:
+I have 2 folders i.e. After_Run folder and Before_Run Folder. Each folder consist of 3 tar files.
+After_Run(Folder)
+1) cnb_in_out_20251212_20251223.tar
+	--cnb_in_20251212_20251223.tar
+	--cnb_log_20251212_20251223.tar
+	--cnb_out_20251212_20251223.tar
+		--error_summary_cnb_out_20251212.psv
+		--summary_count_cnb_out_20251212.psv
+
+2) lgd_ccms_in_out_20251212_20251223.tar
+	--ccms_in_20251212_20251223.tar
+	--ccms_out_20251212_20251223.tar
+		--error_summary_ccms_out_20251212.psv
+		--summary_ccms_out_20251212.psv
+		--summary_count_ccms_out_20251212.psv
+
+3) lgd_commercial_in_out_20251212_20251223.tar
+	--bcrms_in_20251212_20251223.tar
+	--cms_in_20251212_20251223.tar
+	--edw_in_20251212_20251223.tar
+	--newton_in_20251212_20251223.tar
+	--cms_out_20251212_20251223.tar
+	--esn_out_20251212_20251223.tar
+		--error_summary_cms_out_20251212.psv
+		--summary_cms_out_20251212.psv
+		--summary_count_cms_out_20251212.psv
+
+Before_Run(Folder)
+1) cnb_in_out_20251212_20251223.tar
+	--cnb_in_20251212_20251223.tar
+	--cnb_log_20251212_20251223.tar
+	--cnb_out_20251212_20251223.tar
+		--error_summary_cnb_out_20251212.psv
+		--summary_count_cnb_out_20251212.psv
+
+2) lgd_ccms_in_out_20251212_20251223.tar
+	--ccms_in_20251212_20251223.tar
+	--ccms_out_20251212_20251223.tar
+		--error_summary_ccms_out_20251212.psv
+		--summary_ccms_out_20251212.psv
+		--summary_count_ccms_out_20251212.psv
+
+3) lgd_commercial_in_out_20251212_20251223.tar
+	--bcrms_in_20251212_20251223.tar
+	--cms_in_20251212_20251223.tar
+	--edw_in_20251212_20251223.tar
+	--newton_in_20251212_20251223.tar
+	--cms_out_20251212_20251223.tar
+	--esn_out_20251212_20251223.tar
+		--error_summary_cms_out_20251212.psv
+		--summary_cms_out_20251212.psv
+		--summary_count_cms_out_20251212.psv
+Dont reply, just understand the context. Do not give any code right now. Just prepare it. When I ask then give me. Just reply "Understood".
+
+Context 2:
+
+In tar file name, '20251212_20251223' and name in tar file name and psv file name are dynamic. It is like a date/timestamp. So it will change but before timestamp name will not be change like 'cnb_in_out', 'lgd_ccms_in_out' and 'lgd_commercial_in_out'. so instead of '20251212_20251223', you can put '*' which contains anything.
+
+Create a 3 list cnb_list = [error_summary_cnb_out_20251212.psv, summary_count_cnb_out_20251212.psv]
+ccms_list = [error_summary_ccms_out_20251212.psv, summary_ccms_out_20251212.psv, summary_count_ccms_out_20251212.psv]
+cms_list = [error_summary_cms_out_20251212.psv, summary_cms_out_20251212.psv, summary_count_cms_out_20251212.psv]
+
+As I mentioned above, '20251212' are dynamic so it will change so instead of '20251212', you can put '*' which contains anything.
+So modify list as cnb_list = [error_summary_cnb_out_*.psv, summary_count_cnb_out_*.psv]
+Dont reply, just understand the context. Do not give any code right now. Just prepare it. When I ask then give me. Just reply "Understood".
+
+Context 3:
+First Extract the cnb_in_out_*.tar file and then extract cnb_out_*.tar which is in After_Run folder, seach error_summary_cnb_out_*.psv &  summary_count_cnb_out_*.psv in extracted cnb_out_*.tar file. Use Pandas dataframe. So read error_summary_cnb_out_*.psv file, remove '|' symbol as delimiter, and save into dataframe as df_ar_cnb_es.
+then read error_summary_cnb_out_*.psv file, remove '|' symbol as delimiter, and save into dataframe as df_ar_cnb_sc. Keep Column and Rows as it is.
+
+
+then Extract the lgd_ccms_in_out_*.tar file and then extract the ccms_out_*.tar which is in After_Run folder, seach error_summary_ccms_out_20251212.psv, summary_ccms_out_20251212.psv and summary_count_ccms_out_20251212.psv in extracted ccms_out_*.tar file. Use Pandas dataframe. So read error_summary_ccms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_ar_ccms_es.
+then read summary_ccms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_ar_ccms_sc. 
+then read summary_count_ccms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_ar_ccms_scc.
+Keep Columns and Rows as it is.
+
+then Extract the lgd_commercial_in_out_*.tar file and then extract the cms_out_*.tar and esn_out_*.tar which is in After_Run folder, seach error_summary_cms_out_20251212.psv, summary_cms_out_20251212.psv and summary_count_cms_out_20251212.psv in extracted cms_out_*.tar and esn_out_*.tar file. Use Pandas dataframe. So read error_summary_cms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_ar_cms_es.
+then read summary_cms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_ar_cms_sc. 
+then read summary_count_cms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_ar_cms_scc.
+Keep Columns and Rows as it is.
+
+Dont reply, just understand the context. Do not give any code right now. Just prepare it. When I ask then give me. Just reply "Understood".
+
+Context 4:
+First Extract the cnb_in_out_*.tar file and then extract cnb_out_*.tar which is in Before_Run folder, seach error_summary_cnb_out_20251212.psv &  summary_count_cnb_out_20251212.psv in extracted cnb_out_*.tar file. Use Pandas dataframe. So read error_summary_cnb_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_br_cnb_es.
+then read error_summary_cnb_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_br_cnb_sc.Keep Columns and Rows as it is.
+
+then Extract the lgd_ccms_in_out_*.tar file and then extract the ccms_out_*.tar which is in Before_Run folder, seach error_summary_ccms_out_20251212.psv, summary_ccms_out_20251212.psv and summary_count_ccms_out_20251212.psv in extracted ccms_out_*.tar file. Use Pandas dataframe. So read error_summary_ccms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_br_ccms_es.
+then read summary_ccms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_br_ccms_sc. 
+then read summary_count_ccms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_br_ccms_scc.
+Keep Columns and Rows as it is.
+
+then Extract the lgd_commercial_in_out_*.tar file and then extract the cms_out_*.tar and esn_out_*.tar which is in Before_Run folder, seach error_summary_cms_out_20251212.psv, summary_cms_out_20251212.psv and summary_count_cms_out_20251212.psv in extracted cms_out_*.tar and esn_out_*.tar file. Use Pandas dataframe. So read error_summary_cms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_br_cms_es.
+then read summary_cms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_br_cms_sc. 
+then read summary_count_cms_out_20251212.psv file, remove '|' symbol as delimiter, and save into dataframe as df_br_cms_scc.
+Keep Columns and Rows as it is.
+
+Dont reply, just understand the context. Do not give any code right now. Just prepare it. When I ask then give me. Just reply "Understood".
+
+Context 5:
+Now create excel file name as CNB_Validation.excel. IN this excel file, create one sheet name as CNB_Validation.
+Now place the dataframes side by side.like and shown in image.
+Light blue frame table indicate the df_ar_cnb_es data frame
+Light orange frame table indicate the df_ar_cnb_sc data frame
+Light green frame table indicate the df_br_cnb_es data frame
+Light gray frame table indicate the df_br_cnb_sc data frame
+
+there should be 3 rows gap between the df_ar_cnb_es table and df_ar_cnb_sc table. Also there should be 2 column gap between the After_Run Results and
+Before Run results like if 'G' column is occupied by After run results then Before Run results should be start with row 0 and Column 'J'.
+Note: Do not colour the table as shown in image. I am giving you for your understanding and reference.
+Dont reply, just understand the context. Do not give any code right now. Just prepare it. When I ask then give me. Just reply "Understood".
+
+Context 6:
+Now create excel file name as CCMS_Validation.excel. IN this excel file, create one sheet name as CCMS_Validation.
+Now place the dataframes side by side.like and shown in image.
+Light blue frame table indicate the df_ar_ccms_es data frame
+Red frame table indicate the df_ar_ccms_sc data frame
+Light orange frame table indicate the df_ar_ccms_scc data frame
+Light green frame table indicate the df_br_ccms_es data frame
+Yellow frame table indicate the df_br_ccms_sc data frame
+Light gray frame table indicate the df_br_ccms_scc data frame
+
+Row gap and Column gap is as it is described in Context 5.
+Note: Do not colour the table as shown in image. I am giving you for your understanding and reference. Also do same for CMS. Create CMS_Validation excel file and CMS_Validation sheet name. And use the data frame which was create for cms.
+Dont reply, just understand the context. Do not give any code right now. Just prepare it. When I ask then give me. Just reply "Understood".
+
+Context 7:
+Now In CNB_Validation file, Compare the data of df_ar_cnb_es table df_br_cnb_es table in excel file and helightlight the cell with light Yellow if you find the different value. Same do for df_ar_cnb_sc and df_br_cnb_sc.
+Also do the same for CCMS_Validation excel file and CNB_Validation file.
+Dont reply, just understand the context. Do not give any code right now. Just prepare it. When I ask then give me. Just reply "Understood".
+
+
