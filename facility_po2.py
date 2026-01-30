@@ -71,7 +71,7 @@ TITLE_ROW = 1
 
 # Reference label rows
 # CNB has 3 tables (Error Summary, Summary Count, Facility Pivot)
-# CCMS/CMS have 4 tables (Error Summary, Summary, Facility Pivot, Summary Count)
+# CCMS/CMS have 4 tables (Error Summary, Summary, Summary Count, Facility Pivot)
 REF_LABEL_ROWS_2 = [3, 12]
 REF_LABEL_ROWS_3 = [3, 12, 20]
 REF_LABEL_ROWS_4 = [3, 12, 19, 26]
@@ -172,10 +172,7 @@ def _norm_col(name: str) -> str:
 
 
 def _find_facility_header_line(lines):
-    """
-    Facility PSV files may include a metadata line first, then the real header line.
-    Scan the first ~50 lines for a header containing FacilityID + SegmentID + LGDRate.
-    """
+    """Detect header line in facility PSV (handles metadata first line)."""
     must_have = {"facilityid"}
     segment_alts = {"finalsegmentid", "segmentid", "segment"}
     rate_alts = {"finallgdrate", "lgdrate", "final_lgd_rate"}
@@ -194,7 +191,7 @@ def _find_facility_header_line(lines):
 
 
 def read_facility_psv_smart(psv_path: Path) -> pd.DataFrame:
-    """Read facility PSV with smart header detection (handles metadata first line)."""
+    """Read facility PSV with smart header detection."""
     raw_text = psv_path.read_text(encoding="utf-8", errors="replace")
     lines = raw_text.splitlines()
     header_idx = _find_facility_header_line(lines)
@@ -254,7 +251,7 @@ def load_psv_dfs_from_run(run_folder: Path, outer_prefix: str, inner_prefixes, p
 
 
 def load_facility_df_from_run(run_folder: Path, outer_prefix: str, inner_prefixes, facility_pattern: str) -> pd.DataFrame:
-    """Extract outer tar -> extract inner tar(s) -> read facility PSV with smart header detection."""
+    """Extract outer tar -> extract inner tar(s) -> read facility PSV."""
     outer_tar = find_by_prefix(run_folder, outer_prefix)
 
     tmpdir = tempfile.TemporaryDirectory()
@@ -377,6 +374,7 @@ def build_facility_pivot(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def df_with_header_row(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert DF to display DF by including header as first row (writer writes values only)."""
     header = [list(df.columns)]
     body = df.astype(object).values.tolist()
     return pd.DataFrame(header + body)
@@ -566,34 +564,36 @@ def labels_cnb(after=True):
 
 
 def labels_ccms(after=True):
+    # Pivot (Facility) must be last
     if after:
         return [
             "After Run - Error Summary CCMS Out File",
             "After Run - Summary CCMS Out File",
-            "After Run - Facility CCMS Out",
             "After Run - Summary Count CCMS Out File",
+            "After Run - Facility CCMS Out",
         ]
     return [
         "Before Run - Error Summary CCMS Out File",
         "Before Run - Summary CCMS Out File",
-        "Before Run - Facility CCMS Out",
         "Before Run - Summary Count CCMS Out File",
+        "Before Run - Facility CCMS Out",
     ]
 
 
 def labels_cms(after=True):
+    # Pivot (Facility) must be last
     if after:
         return [
             "After Run - Error Summary CMS Out File",
             "After Run - Summary CMS Out File",
-            "After Run - Facility CMS Out",
             "After Run - Summary Count CMS Out File",
+            "After Run - Facility CMS Out",
         ]
     return [
         "Before Run - Error Summary CMS Out File",
         "Before Run - Summary CMS Out File",
-        "Before Run - Facility CMS Out",
         "Before Run - Summary Count CMS Out File",
+        "Before Run - Facility CMS Out",
     ]
 
 
@@ -652,7 +652,7 @@ def main():
         )
         print("✅ Generated CNB_Validation.xlsx")
 
-    # CCMS
+    # CCMS (pivot must be last)
     if can_generate(CCMS_OUTER_PREFIX, "CCMS_Validation.xlsx"):
         df_ar_ccms_es, df_ar_ccms_sc, df_ar_ccms_scc = load_psv_dfs_from_run(
             AFTER_DIR, CCMS_OUTER_PREFIX, CCMS_INNER_OUT_PREFIX, ccms_list
@@ -674,17 +674,18 @@ def main():
         df_ar_facility_ccms_out_pt_disp = df_with_header_row(df_ar_facility_ccms_out_pt)
         df_br_facility_ccms_out_pt_disp = df_with_header_row(df_br_facility_ccms_out_pt)
 
+        # Order: Error Summary, Summary, Summary Count, Facility (pivot last)
         build_validation_excel(
             out_file="CCMS_Validation.xlsx",
             sheet_name="CCMS_Validation",
-            after_tables=[df_ar_ccms_es, df_ar_ccms_sc, df_ar_facility_ccms_out_pt_disp, df_ar_ccms_scc],
-            before_tables=[df_br_ccms_es, df_br_ccms_sc, df_br_facility_ccms_out_pt_disp, df_br_ccms_scc],
+            after_tables=[df_ar_ccms_es, df_ar_ccms_sc, df_ar_ccms_scc, df_ar_facility_ccms_out_pt_disp],
+            before_tables=[df_br_ccms_es, df_br_ccms_sc, df_br_ccms_scc, df_br_facility_ccms_out_pt_disp],
             after_section_labels=labels_ccms(after=True),
             before_section_labels=labels_ccms(after=False),
         )
         print("✅ Generated CCMS_Validation.xlsx")
 
-    # CMS
+    # CMS (pivot must be last)
     if can_generate(COMM_OUTER_PREFIX, "CMS_Validation.xlsx"):
         df_ar_cms_es, df_ar_cms_sc, df_ar_cms_scc = load_psv_dfs_from_run(
             AFTER_DIR, COMM_OUTER_PREFIX, [CMS_INNER_OUT_PREFIX, ESN_INNER_OUT_PREFIX], cms_list
@@ -706,11 +707,12 @@ def main():
         df_ar_facility_cms_out_pt_disp = df_with_header_row(df_ar_facility_cms_out_pt)
         df_br_facility_cms_out_pt_disp = df_with_header_row(df_br_facility_cms_out_pt)
 
+        # Order: Error Summary, Summary, Summary Count, Facility (pivot last)
         build_validation_excel(
             out_file="CMS_Validation.xlsx",
             sheet_name="CMS_Validation",
-            after_tables=[df_ar_cms_es, df_ar_cms_sc, df_ar_facility_cms_out_pt_disp, df_ar_cms_scc],
-            before_tables=[df_br_cms_es, df_br_cms_sc, df_br_facility_cms_out_pt_disp, df_br_cms_scc],
+            after_tables=[df_ar_cms_es, df_ar_cms_sc, df_ar_cms_scc, df_ar_facility_cms_out_pt_disp],
+            before_tables=[df_br_cms_es, df_br_cms_sc, df_br_cms_scc, df_br_facility_cms_out_pt_disp],
             after_section_labels=labels_cms(after=True),
             before_section_labels=labels_cms(after=False),
         )
