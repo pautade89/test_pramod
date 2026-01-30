@@ -41,7 +41,7 @@ cms_list = [
 ]
 
 # =========================
-# NEW: Facility PSV patterns
+# Facility PSV patterns
 # =========================
 facility_cnb_pattern = "facility_cnb_out_*.psv"
 facility_ccms_pattern = "facility_ccms_out_*.psv"
@@ -71,10 +71,13 @@ COL_GAP_BETWEEN_BLOCKS = 2   # 2 blank columns between blocks
 ROW_GAP_BETWEEN_TABLES = 3   # 3 row gap between tables
 
 TITLE_ROW = 1
+
 # Reference label rows
-REF_LABEL_ROWS_2 = [3, 12]              # CNB (old)
-REF_LABEL_ROWS_3 = [3, 12, 20]          # CNB (with Facility) -> aligns with sample image
-REF_LABEL_ROWS_4 = [3, 12, 19, 26]      # CCMS/CMS (with Facility)
+# CNB has 3 tables (Error Summary, Summary Count, Facility Pivot)
+# CCMS/CMS have 4 tables (Error Summary, Summary, Facility Pivot, Summary Count)
+REF_LABEL_ROWS_2 = [3, 12]
+REF_LABEL_ROWS_3 = [3, 12, 20]
+REF_LABEL_ROWS_4 = [3, 12, 19, 26]
 
 
 # =========================
@@ -166,19 +169,65 @@ def read_psv_preserve_shape(psv_path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def read_psv_with_header(psv_path: Path) -> pd.DataFrame:
-    """Read PSV using '|' delimiter and treat first line as header (facility files)."""
+def _norm_col(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
+
+
+def _find_facility_header_line(lines):
+    """
+    Facility PSV files in your sample have a metadata line first, then the real header line.
+    We scan the first ~50 lines for a header that contains FacilityID + SegmentID + LGDRate keys.
+    """
+    # minimal required tokens (normalized)
+    must_have = {"facilityid"}
+    segment_alts = {"finalsegmentid", "segmentid", "segment"}
+    rate_alts = {"finallgdrate", "lgdrate", "final_lgd_rate"}
+
+    for idx, line in enumerate(lines[:50]):
+        cols = [c.strip() for c in line.split("|") if c.strip() != ""]
+        norm_cols = {_norm_col(c) for c in cols}
+        if must_have.issubset(norm_cols) and (norm_cols & segment_alts) and (norm_cols & rate_alts):
+            return idx
+
+    # fallback: find any line that contains 'FacilityID' literally
+    for idx, line in enumerate(lines[:50]):
+        if "FacilityID" in line:
+            return idx
+
+    return 0
+
+
+def read_facility_psv_smart(psv_path: Path) -> pd.DataFrame:
+    """
+    Reads facility PSV correctly even if the first line is metadata.
+    - Detects the header line index.
+    - Uses pandas read_csv with skiprows to set that line as header.
+    """
+    raw_text = psv_path.read_text(encoding="utf-8", errors="replace")
+    lines = raw_text.splitlines()
+
+    header_idx = _find_facility_header_line(lines)
+
     df = pd.read_csv(
         psv_path,
         sep="|",
         engine="python",
         header=0,
+        skiprows=header_idx,
         dtype=str,
         keep_default_na=False,
     )
+
+    # Clean column names, drop unnamed empty columns
     df.columns = [str(c).strip() for c in df.columns]
+    df = df.loc[:, [c for c in df.columns if not _norm_col(c).startswith("unnamed")]]
+
     return df
 
+
+# =========================
+# Loaders
+# =========================
 
 def load_psv_dfs_from_run(run_folder: Path, outer_prefix: str, inner_prefixes, psv_patterns):
     """Extract outer tar -> extract inner tar(s) -> read PSV(s) (preserve-shape)."""
@@ -214,8 +263,9 @@ def load_psv_dfs_from_run(run_folder: Path, outer_prefix: str, inner_prefixes, p
         tmpdir.cleanup()
 
 
+
 def load_facility_df_from_run(run_folder: Path, outer_prefix: str, inner_prefixes, facility_pattern: str) -> pd.DataFrame:
-    """Extract outer tar -> extract inner tar(s) -> read facility PSV with header."""
+    """Extract outer tar -> extract inner tar(s) -> read facility PSV with smart header detection."""
     outer_tar = find_by_prefix(run_folder, outer_prefix)
 
     tmpdir = tempfile.TemporaryDirectory()
@@ -239,7 +289,7 @@ def load_facility_df_from_run(run_folder: Path, outer_prefix: str, inner_prefixe
             extract_tar(inner_tar, dest)
 
         facility_psv = find_psv_by_glob(inner_extract_root, facility_pattern)
-        return read_psv_with_header(facility_psv)
+        return read_facility_psv_smart(facility_psv)
 
     finally:
         tmpdir.cleanup()
@@ -249,10 +299,6 @@ def load_facility_df_from_run(run_folder: Path, outer_prefix: str, inner_prefixe
 # Facility pivot builder (robust column mapping)
 # =========================
 
-def _norm_col(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
-
-
 def _resolve_required_cols(df: pd.DataFrame):
     """Resolve actual column names for FacilityID, SegmentID, LGDRate even if headers vary."""
     norm_map = {_norm_col(c): c for c in df.columns}
@@ -261,11 +307,11 @@ def _resolve_required_cols(df: pd.DataFrame):
     segment_keys = [
         "finalsegmentid", "final_segment_id", "final segment id",
         "segmentid", "segment_id", "segment id",
-        "segment", "segmentidentifier"
+        "segment"
     ]
     rate_keys = [
         "finallgdrate", "final_lgd_rate", "final lgd rate",
-        "lgdrate", "lgd rate", "finalrate", "rate"
+        "lgdrate", "lgd rate"
     ]
 
     def pick(keys):
@@ -297,17 +343,23 @@ def _resolve_required_cols(df: pd.DataFrame):
     return facility_col, segment_col, rate_col
 
 
+
 def build_facility_pivot(df: pd.DataFrame) -> pd.DataFrame:
     """Create pivot-like summary per Segment ID with count and average LGD% (whole percent)."""
     facility_col, segment_col, rate_col = _resolve_required_cols(df)
 
     work = df[[facility_col, segment_col, rate_col]].copy()
 
+    # Ensure segment id is clean
+    work[segment_col] = work[segment_col].astype(str).str.strip()
+
+    # Convert rate to numeric percent
     rate = work[rate_col].astype(str).str.strip()
     rate = rate.str.replace("%", "", regex=False)
     rate = rate.str.replace(",", "", regex=False)
     rate_num = pd.to_numeric(rate, errors="coerce")
 
+    # If values appear fractional (0-1), convert to percent
     max_rate = rate_num.max(skipna=True)
     if pd.notna(max_rate) and max_rate <= 1.5:
         rate_num = rate_num * 100.0
@@ -326,14 +378,15 @@ def build_facility_pivot(df: pd.DataFrame) -> pd.DataFrame:
         .rename(columns={segment_col: "Segment ID"})
     )
 
+    # Format average as whole percent like your screenshot
     pt["Average of FinalLGDRate"] = pt["Average of FinalLGDRate"].map(
         lambda x: "" if pd.isna(x) else f"{round(x):.0f}%"
     )
 
-    # Sort Segment ID as numeric when possible, else as string
+    # Sort Segment ID numerically when possible
     def _seg_sort_key(v):
         try:
-            return (0, int(str(v)))
+            return (0, int(float(str(v))))
         except Exception:
             return (1, str(v))
 
@@ -342,8 +395,9 @@ def build_facility_pivot(df: pd.DataFrame) -> pd.DataFrame:
     return pt
 
 
+
 def df_with_header_row(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert DF to a display DF that includes header as first row (because Excel writer writes values only)."""
+    """Convert DF to a display DF that includes header as first row (writer writes values only)."""
     header = [list(df.columns)]
     body = df.astype(object).values.tolist()
     return pd.DataFrame(header + body)
@@ -467,11 +521,9 @@ def build_validation_excel(
     computed_min_before = left_start_col + block_width + COL_GAP_BETWEEN_BLOCKS
     right_start_col = max(BEFORE_MIN_START_COL, computed_min_before)
 
-    # Titles
     write_title(ws, TITLE_ROW, left_start_col, "After_Run Results")
     write_title(ws, TITLE_ROW, right_start_col, "Before_Run Results")
 
-    # Reference label rows by number of tables
     if len(after_tables) == 2:
         ref_rows = REF_LABEL_ROWS_2
     elif len(after_tables) == 3:
@@ -482,7 +534,7 @@ def build_validation_excel(
     after_ranges = []
     before_ranges = []
 
-    # After
+    # After block
     prev_bottom = 0
     for i, df in enumerate(after_tables):
         desired_label_row = ref_rows[i] if i < len(ref_rows) else (prev_bottom + 1 + ROW_GAP_BETWEEN_TABLES)
@@ -493,7 +545,7 @@ def build_validation_excel(
         after_ranges.append(rng)
         prev_bottom = rng[2]
 
-    # Before
+    # Before block
     prev_bottom = 0
     for i, df in enumerate(before_tables):
         desired_label_row = ref_rows[i] if i < len(ref_rows) else (prev_bottom + 1 + ROW_GAP_BETWEEN_TABLES)
@@ -627,7 +679,6 @@ def main():
             print("Columns:", list(df_ar_facility_cnb_out_pt.columns))
             print(df_ar_facility_cnb_out_pt.head(60).to_string(index=False))
 
-        # Display DFs (include header row)
         df_ar_facility_cnb_out_pt_disp = df_with_header_row(df_ar_facility_cnb_out_pt)
         df_br_facility_cnb_out_pt_disp = df_with_header_row(df_br_facility_cnb_out_pt)
 
@@ -663,7 +714,7 @@ def main():
         df_ar_facility_ccms_out_pt_disp = df_with_header_row(df_ar_facility_ccms_out_pt)
         df_br_facility_ccms_out_pt_disp = df_with_header_row(df_br_facility_ccms_out_pt)
 
-        # Order: Error Summary, Summary, Facility, Summary Count (as per requirement)
+        # Order: Error Summary, Summary, Facility, Summary Count
         build_validation_excel(
             out_file="CCMS_Validation.xlsx",
             sheet_name="CCMS_Validation",
@@ -674,7 +725,7 @@ def main():
         )
         print("✅ Generated CCMS_Validation.xlsx")
 
-    # CMS (Commercial)
+    # CMS
     if can_generate(COMM_OUTER_PREFIX, "CMS_Validation.xlsx"):
         df_ar_cms_es, df_ar_cms_sc, df_ar_cms_scc = load_psv_dfs_from_run(
             AFTER_DIR, COMM_OUTER_PREFIX, [CMS_INNER_OUT_PREFIX, ESN_INNER_OUT_PREFIX], cms_list
@@ -696,7 +747,7 @@ def main():
         df_ar_facility_cms_out_pt_disp = df_with_header_row(df_ar_facility_cms_out_pt)
         df_br_facility_cms_out_pt_disp = df_with_header_row(df_br_facility_cms_out_pt)
 
-        # Order: Error Summary, Summary, Facility, Summary Count (as per requirement)
+        # Order: Error Summary, Summary, Facility, Summary Count
         build_validation_excel(
             out_file="CMS_Validation.xlsx",
             sheet_name="CMS_Validation",
