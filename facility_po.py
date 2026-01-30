@@ -1,11 +1,10 @@
-import fnmatch
 import tarfile
-from io import BytesIO
+import tempfile
 from pathlib import Path
 
 import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 
@@ -16,405 +15,688 @@ BASE_DIR = Path(__file__).resolve().parent
 AFTER_DIR = BASE_DIR / "After_Run"
 BEFORE_DIR = BASE_DIR / "Before_Run"
 
-# ==========================================================
-# Styling configuration
-# ==========================================================
-LIGHT_GREEN = PatternFill("solid", fgColor="C6EFCE")   # match
-LIGHT_YELLOW = PatternFill("solid", fgColor="FFF2CC")  # mismatch
-THIN_SIDE = Side(style="thin", color="000000")
-THIN_BORDER = Border(left=THIN_SIDE, right=THIN_SIDE, top=THIN_SIDE, bottom=THIN_SIDE)
 
-HEADER_FONT = Font(bold=True)
-TITLE_FONT = Font(bold=True)
-CENTER = Alignment(horizontal="center", vertical="center")
+# =========================
+# PSV patterns (dynamic date part) - existing
+# =========================
+cnb_list = [
+    "error_summary_cnb_out_*.psv",
+    "summary_count_cnb_out_*.psv",
+]
 
-# Excel layout
-TOP_TITLE_ROW = 1      # After_Run Results / Before_Run Results
-SUB_TITLE_ROW = 3      # After Run - Facility ... / Before Run - Facility ...
-TABLE_START_ROW = 5    # pivot header row starts here
+ccms_list = [
+    "error_summary_ccms_out_*.psv",
+    "summary_ccms_out_*.psv",
+    "summary_count_ccms_out_*.psv",
+]
 
-AFTER_START_COL = 1    # column A
-GAP_COLS = 2           # 2-column gap
+cms_list = [
+    "error_summary_cms_out_*.psv",
+    "summary_cms_out_*.psv",
+    "summary_count_cms_out_*.psv",
+]
+
+# =========================
+# NEW: Facility PSV patterns
+# =========================
+facility_cnb_pattern = "facility_cnb_out_*.psv"
+facility_ccms_pattern = "facility_ccms_out_*.psv"
+facility_cms_pattern = "facility_cms_out_*.psv"
 
 
-# ==========================================================
-# TAR/PSV extraction helpers
-# ==========================================================
-def find_first_matching_tar(folder: Path, pattern: str) -> Path | None:
-    """Return the first matching tar path under folder for given pattern e.g. 'cnb_in_out_*.tar'."""
-    matches = sorted(folder.glob(pattern))
-    return matches[0] if matches else None
+# =========================
+# TAR prefixes (dynamic timestamp part)
+# =========================
+CNB_OUTER_PREFIX = "cnb_in_out"
+CNB_INNER_OUT_PREFIX = "cnb_out"
+
+CCMS_OUTER_PREFIX = "lgd_ccms_in_out"
+CCMS_INNER_OUT_PREFIX = "ccms_out"
+
+COMM_OUTER_PREFIX = "lgd_commercial_in_out"
+CMS_INNER_OUT_PREFIX = "cms_out"
+ESN_INNER_OUT_PREFIX = "esn_out"
 
 
-def extract_inner_tar_bytes(outer_tar: tarfile.TarFile, inner_tar_glob: str) -> BytesIO | None:
+# =========================
+# Excel layout rules (reference format)
+# =========================
+AFTER_START_COL = 1          # A
+BEFORE_MIN_START_COL = 10    # J (as per reference)
+COL_GAP_BETWEEN_BLOCKS = 2   # 2 blank columns between blocks
+ROW_GAP_BETWEEN_TABLES = 3   # 3 row gap between tables
+
+TITLE_ROW = 1
+
+# Reference slots:
+# - 2 tables: CNB old
+# - 3 tables: CNB new (adds Facility PT)
+# - 4 tables: CCMS/CMS new (adds Facility PT)
+REF_LABEL_ROWS_2 = [3, 12]
+REF_LABEL_ROWS_3 = [3, 12, 19]
+REF_LABEL_ROWS_4 = [3, 12, 19, 26]
+
+
+# =========================
+# Styles
+# =========================
+TITLE_FONT = Font(bold=True, size=12)
+BOLD = Font(bold=True)
+ALIGN_LEFT = Alignment(horizontal="left", vertical="center", wrap_text=False)
+
+# Context 8 coloring:
+MATCH_FILL = PatternFill("solid", fgColor="C6EFCE")  # light green
+DIFF_FILL = PatternFill("solid", fgColor="FFF2CC")   # light yellow
+
+# Borders only within table ranges (grid like sample)
+thin = Side(style="thin", color="000000")
+CELL_BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+
+# =========================
+# TAR helpers
+# =========================
+TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz")
+
+
+def tar_present_by_prefix(folder: Path, prefix: str) -> bool:
+    if not folder.exists():
+        return False
+    return any(
+        p.is_file() and p.name.startswith(prefix) and p.name.endswith(TAR_SUFFIXES)
+        for p in folder.iterdir()
+    )
+
+
+def find_by_prefix(folder: Path, prefix: str) -> Path:
     """
-    From an open outer tarfile, locate an inner tar member matching inner_tar_glob,
-    extract into BytesIO, and return it.
+    Pick newest file under folder that starts with prefix and ends with .tar/.tar.gz/.tgz
     """
     candidates = [
-        m for m in outer_tar.getmembers()
-        if fnmatch.fnmatch(Path(m.name).name, inner_tar_glob)
+        p for p in folder.iterdir()
+        if p.is_file() and p.name.startswith(prefix) and p.name.endswith(TAR_SUFFIXES)
     ]
     if not candidates:
-        return None
+        present = sorted([p.name for p in folder.iterdir() if p.is_file()]) if folder.exists() else []
+        raise FileNotFoundError(
+            f"Couldn't find any tar starting with '{prefix}' under: {folder}\n"
+            f"Files present: {present}"
+        )
+    candidates.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    if len(candidates) > 1:
+        print(f"⚠️ Multiple matches for '{prefix}' in {folder}. Using newest: {candidates[0].name}")
+    return candidates[0]
 
-    inner_member = candidates[0]
-    f = outer_tar.extractfile(inner_member)
-    if f is None:
-        return None
 
-    return BytesIO(f.read())
-
-
-def read_psv_from_inner_tar(inner_tar_bytes: BytesIO, psv_glob: str) -> pd.DataFrame | None:
+def find_inside_extracted(root: Path, prefix: str) -> Path:
     """
-    Open inner tar from BytesIO and read first PSV that matches psv_glob into a DataFrame.
+    Find newest inner tar recursively inside extracted outer tar folder.
     """
-    inner_tar_bytes.seek(0)
-    with tarfile.open(fileobj=inner_tar_bytes, mode="r:*") as itar:
-        members = itar.getmembers()
-        psv_candidates = [
-            m for m in members
-            if fnmatch.fnmatch(Path(m.name).name, psv_glob)
-        ]
-        if not psv_candidates:
-            return None
-
-        psv_member = psv_candidates[0]
-        f = itar.extractfile(psv_member)
-        if f is None:
-            return None
-
-        # PSV uses pipe delimiter and already has header
-        return pd.read_csv(f, sep="|", engine="python")
+    matches = [
+        p for p in root.rglob("*")
+        if p.is_file() and p.name.startswith(prefix) and p.name.endswith(TAR_SUFFIXES)
+    ]
+    if not matches:
+        raise FileNotFoundError(f"Couldn't find inner tar starting with '{prefix}' under extracted: {root}")
+    matches.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    if len(matches) > 1:
+        print(f"⚠️ Multiple inner matches for '{prefix}'. Using newest: {matches[0].name}")
+    return matches[0]
 
 
-def load_facility_df(folder: Path, outer_tar_pattern: str, inner_tar_pattern: str, psv_pattern: str) -> pd.DataFrame | None:
+def find_psv_by_glob(root: Path, pattern: str) -> Path:
+    matches = sorted(root.rglob(pattern))
+    if not matches:
+        raise FileNotFoundError(f"Couldn't find PSV '{pattern}' under extracted: {root}")
+    matches.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    if len(matches) > 1:
+        print(f"⚠️ Multiple PSV matches for '{pattern}'. Using newest: {matches[0].name}")
+    return matches[0]
+
+
+def extract_tar(tar_path: Path, extract_to: Path) -> None:
+    with tarfile.open(tar_path, "r:*") as tar:
+        tar.extractall(path=extract_to)
+
+
+# =========================
+# PSV parsing
+# =========================
+def read_psv_preserve_shape(psv_path: Path) -> pd.DataFrame:
     """
-    Find outer tar, open it, extract inner tar bytes, read PSV from inner tar -> dataframe.
+    Existing behavior:
+    Split each line by literal '|', pad rows to max columns.
+    No header inference; keeps file rows/cols as-is.
     """
-    outer_tar_path = find_first_matching_tar(folder, outer_tar_pattern)
-    if not outer_tar_path:
-        return None
-
-    with tarfile.open(outer_tar_path, mode="r:*") as otar:
-        inner_bytes = extract_inner_tar_bytes(otar, inner_tar_pattern)
-        if inner_bytes is None:
-            return None
-        return read_psv_from_inner_tar(inner_bytes, psv_pattern)
+    lines = psv_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    rows = [line.split("|") for line in lines]
+    max_len = max((len(r) for r in rows), default=0)
+    rows = [r + [""] * (max_len - len(r)) for r in rows]
+    return pd.DataFrame(rows)
 
 
-def load_cms_facility_df(folder: Path) -> pd.DataFrame | None:
+def read_psv_with_header(psv_path: Path) -> pd.DataFrame:
     """
-    For commercial case, facility_cms_out_*.psv can be inside cms_out_*.tar OR esn_out_*.tar.
-    Try cms_out first, then esn_out.
+    NEW behavior for facility files:
+    Read PSV using '|' delimiter and treat first line as header.
+    Keeps columns & rows as-is; avoids NA conversion.
     """
-    outer_tar_path = find_first_matching_tar(folder, "lgd_commercial_in_out_*.tar")
-    if not outer_tar_path:
-        return None
-
-    with tarfile.open(outer_tar_path, mode="r:*") as otar:
-        for inner_tar_pattern in ["cms_out_*.tar", "esn_out_*.tar"]:
-            inner_bytes = extract_inner_tar_bytes(otar, inner_tar_pattern)
-            if inner_bytes is None:
-                continue
-            df = read_psv_from_inner_tar(inner_bytes, "facility_cms_out_*.psv")
-            if df is not None:
-                return df
-
-    return None
+    df = pd.read_csv(
+        psv_path,
+        sep="|",
+        engine="python",
+        header=0,
+        dtype=str,
+        keep_default_na=False,
+    )
+    # normalize column names (strip spaces)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 
-# ==========================================================
-# Pivot logic
-# ==========================================================
-def normalize_lgd_rate(series: pd.Series) -> pd.Series:
+def load_psv_dfs_from_run(run_folder: Path, outer_prefix: str, inner_prefixes, psv_patterns):
     """
-    Convert FinalLGDRate to numeric and normalize to fraction (0-1) if it looks like 0-100.
+    Extract outer tar by prefix -> extract inner tar(s) by prefix -> read PSV(s) by wildcard.
+    Uses preserve-shape reading (existing files).
     """
-    s = pd.to_numeric(series, errors="coerce")
-    non_na = s.dropna()
-    if not non_na.empty:
-        mx = non_na.max()
-        if mx > 1.0 and mx <= 100.0:
-            s = s / 100.0
-    return s
+    outer_tar = find_by_prefix(run_folder, outer_prefix)
+
+    tmpdir = tempfile.TemporaryDirectory()
+    tmp_root = Path(tmpdir.name)
+
+    try:
+        outer_extract = tmp_root / "outer"
+        outer_extract.mkdir(parents=True, exist_ok=True)
+        extract_tar(outer_tar, outer_extract)
+
+        inner_extract_root = tmp_root / "inner"
+        inner_extract_root.mkdir(parents=True, exist_ok=True)
+
+        if isinstance(inner_prefixes, str):
+            inner_prefixes = [inner_prefixes]
+
+        for pref in inner_prefixes:
+            inner_tar = find_inside_extracted(outer_extract, pref)
+            dest = inner_extract_root / inner_tar.stem
+            dest.mkdir(parents=True, exist_ok=True)
+            extract_tar(inner_tar, dest)
+
+        dfs = []
+        for pat in psv_patterns:
+            psv_file = find_psv_by_glob(inner_extract_root, pat)
+            dfs.append(read_psv_preserve_shape(psv_file))
+
+        return dfs
+    finally:
+        tmpdir.cleanup()
 
 
-def make_pivot(df: pd.DataFrame) -> pd.DataFrame:
+def load_facility_df_from_run(run_folder: Path, outer_prefix: str, inner_prefixes, facility_pattern: str) -> pd.DataFrame:
     """
-    Output pivot dataframe:
-      - Final Segment ID
-      - Count of FacilityID
-      - Average Final LGD Rate (stored as fraction, formatted as % in Excel)
+    NEW:
+    Extract outer tar by prefix -> extract inner tar(s) by prefix -> read facility PSV by wildcard with header.
+    """
+    outer_tar = find_by_prefix(run_folder, outer_prefix)
+
+    tmpdir = tempfile.TemporaryDirectory()
+    tmp_root = Path(tmpdir.name)
+
+    try:
+        outer_extract = tmp_root / "outer"
+        outer_extract.mkdir(parents=True, exist_ok=True)
+        extract_tar(outer_tar, outer_extract)
+
+        inner_extract_root = tmp_root / "inner"
+        inner_extract_root.mkdir(parents=True, exist_ok=True)
+
+        if isinstance(inner_prefixes, str):
+            inner_prefixes = [inner_prefixes]
+
+        for pref in inner_prefixes:
+            inner_tar = find_inside_extracted(outer_extract, pref)
+            dest = inner_extract_root / inner_tar.stem
+            dest.mkdir(parents=True, exist_ok=True)
+            extract_tar(inner_tar, dest)
+
+        facility_psv = find_psv_by_glob(inner_extract_root, facility_pattern)
+        return read_psv_with_header(facility_psv)
+
+    finally:
+        tmpdir.cleanup()
+
+
+# =========================
+# Pivot table builder (Facility)
+# =========================
+def build_facility_pivot(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Input DF has headers and includes:
+      FacilityID, FinalSegmentID, FinalLGDRate
+
+    Output pivot DF:
+      Final Segment ID | Count of Facility ID | Average Final LGD Rate
+    Average is percentage (string with %).
     """
     required = {"FacilityID", "FinalSegmentID", "FinalLGDRate"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+        raise ValueError(f"Facility file missing required columns: {sorted(missing)}. Found: {list(df.columns)}")
 
-    tmp = df[["FacilityID", "FinalSegmentID", "FinalLGDRate"]].copy()
-    tmp["FinalLGDRate"] = normalize_lgd_rate(tmp["FinalLGDRate"])
+    work = df[["FacilityID", "FinalSegmentID", "FinalLGDRate"]].copy()
 
+    # Clean rate to numeric
+    rate = work["FinalLGDRate"].astype(str).str.strip()
+    rate = rate.str.replace("%", "", regex=False)
+    rate_num = pd.to_numeric(rate, errors="coerce")
+
+    # Heuristic: if rates look like fractions (<= 1.5), convert to percent
+    max_rate = rate_num.max(skipna=True)
+    if pd.notna(max_rate) and max_rate <= 1.5:
+        rate_num = rate_num * 100.0
+
+    work["__rate_num__"] = rate_num
+
+    # Group
     pt = (
-        tmp.groupby("FinalSegmentID", dropna=False)
-           .agg(
-               **{
-                   "Count of FacilityID": ("FacilityID", "count"),
-                   "Average Final LGD Rate": ("FinalLGDRate", "mean"),
-               }
-           )
-           .reset_index()
-           .rename(columns={"FinalSegmentID": "Final Segment ID"})
+        work.groupby("FinalSegmentID", dropna=False)
+        .agg(
+            **{
+                "Count of Facility ID": ("FacilityID", "count"),
+                "Average Final LGD Rate": ("__rate_num__", "mean"),
+            }
+        )
+        .reset_index()
     )
 
-    # Sort by Final Segment ID if numeric-like
-    def safe_float(x):
-        try:
-            return float(x)
-        except Exception:
-            return float("inf")
+    # Rename first column
+    pt = pt.rename(columns={"FinalSegmentID": "Final Segment ID"})
 
-    pt["_k"] = pt["Final Segment ID"].apply(safe_float)
-    pt = pt.sort_values("_k").drop(columns="_k")
+    # Format average as percentage string (2 decimals)
+    pt["Average Final LGD Rate"] = pt["Average Final LGD Rate"].map(
+        lambda x: "" if pd.isna(x) else f"{x:.2f}%"
+    )
+
+    # Ensure consistent ordering (optional)
+    pt["Final Segment ID"] = pt["Final Segment ID"].astype(str)
+    pt = pt.sort_values("Final Segment ID", kind="stable").reset_index(drop=True)
 
     return pt
 
 
-def align_pivots(after_pt: pd.DataFrame, before_pt: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def df_with_header_row(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Ensure both pivots have the same set of Final Segment IDs (outer union),
-    so comparison/highlighting is row-aligned.
+    Because the Excel writer writes "values only" (no headers),
+    this converts a dataframe into a display dataframe with the header as the first row.
     """
-    a = after_pt.set_index("Final Segment ID")
-    b = before_pt.set_index("Final Segment ID")
-
-    all_idx = a.index.union(b.index)
-    a2 = a.reindex(all_idx).reset_index()
-    b2 = b.reindex(all_idx).reset_index()
-    return a2, b2
+    header = [list(df.columns)]
+    body = df.astype(object).values.tolist()
+    return pd.DataFrame(header + body)
 
 
-# ==========================================================
-# Excel writer + formatting + comparison highlighting
-# ==========================================================
-def write_side_by_side_excel(
-    out_xlsx: Path,
+# =========================
+# Excel helpers
+# =========================
+def open_or_create_and_clear(filepath: Path, sheet_name: str):
+    """
+    If file exists -> open workbook -> remove all sheets -> create fresh sheet
+    Else -> create new workbook with only that sheet
+    """
+    if filepath.exists():
+        wb = load_workbook(filepath)
+        for s in list(wb.sheetnames):
+            wb.remove(wb[s])
+        wb.create_sheet(sheet_name)
+    else:
+        wb = Workbook()
+        default = wb.active
+        wb.remove(default)
+        wb.create_sheet(sheet_name)
+    return wb
+
+
+def autosize_columns(ws, col_start: int, col_end: int, row_start: int, row_end: int, min_w=10, max_w=60):
+    for c in range(col_start, col_end + 1):
+        max_len = 0
+        for r in range(row_start, row_end + 1):
+            v = ws.cell(r, c).value
+            if v is None:
+                continue
+            max_len = max(max_len, len(str(v)))
+        ws.column_dimensions[get_column_letter(c)].width = min(max(min_w, max_len + 2), max_w)
+
+
+def write_title(ws, row: int, col: int, text: str):
+    cell = ws.cell(row=row, column=col, value=text)
+    cell.font = TITLE_FONT
+    cell.alignment = ALIGN_LEFT
+
+
+def write_section_label(ws, row: int, col: int, text: str):
+    cell = ws.cell(row=row, column=col, value=text)
+    cell.font = BOLD
+    cell.alignment = ALIGN_LEFT
+
+
+def write_df_values_only(ws, df: pd.DataFrame, start_row: int, start_col: int):
+    """
+    Write DF values only (no implicit headers).
+    Returns range: (top, left, bottom, right)
+    """
+    nrows, ncols = df.shape
+    for i in range(nrows):
+        for j in range(ncols):
+            ws.cell(row=start_row + i, column=start_col + j, value=df.iat[i, j])
+
+    top = start_row
+    left = start_col
+    bottom = start_row + nrows - 1
+    right = start_col + ncols - 1
+    return top, left, bottom, right
+
+
+def apply_table_cell_borders(ws, rng):
+    """
+    Apply borders ONLY to cells inside the dataframe/table range (grid like sample).
+    No borders outside the table.
+    """
+    top, left, bottom, right = rng
+    for r in range(top, bottom + 1):
+        for c in range(left, right + 1):
+            ws.cell(r, c).border = CELL_BORDER
+
+
+def compare_and_color(ws, rng_after, rng_before):
+    """
+    Context 8:
+    - Match -> light green
+    - Diff  -> light yellow
+    Apply to BOTH sides.
+    """
+    a_top, a_left, a_bottom, a_right = rng_after
+    b_top, b_left, b_bottom, b_right = rng_before
+
+    a_rows = a_bottom - a_top + 1
+    a_cols = a_right - a_left + 1
+    b_rows = b_bottom - b_top + 1
+    b_cols = b_right - b_left + 1
+
+    max_rows = max(a_rows, b_rows)
+    max_cols = max(a_cols, b_cols)
+
+    for r in range(max_rows):
+        for c in range(max_cols):
+            a_exists = (r < a_rows and c < a_cols)
+            b_exists = (r < b_rows and c < b_cols)
+
+            a_r, a_c = a_top + r, a_left + c
+            b_r, b_c = b_top + r, b_left + c
+
+            a_val = ws.cell(a_r, a_c).value if a_exists else ""
+            b_val = ws.cell(b_r, b_c).value if b_exists else ""
+
+            a_str = "" if a_val is None else str(a_val)
+            b_str = "" if b_val is None else str(b_val)
+
+            fill = MATCH_FILL if a_str == b_str else DIFF_FILL
+
+            if a_exists:
+                ws.cell(a_r, a_c).fill = fill
+            if b_exists:
+                ws.cell(b_r, b_c).fill = fill
+
+
+def build_validation_excel(
+    out_file: str,
     sheet_name: str,
-    after_pt: pd.DataFrame,
-    before_pt: pd.DataFrame,
-    after_title: str,
-    before_title: str
+    after_tables: list,
+    before_tables: list,
+    after_section_labels: list,
+    before_section_labels: list
 ):
-    after_aligned, before_aligned = align_pivots(after_pt, before_pt)
-
-    after_width = after_aligned.shape[1]              # 3 columns
-    before_start_col = AFTER_START_COL + after_width + GAP_COLS
-
-    # Write both tables
-    with pd.ExcelWriter(out_xlsx, engine="openpyxl") as writer:
-        pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
-
-        after_aligned.to_excel(
-            writer, sheet_name=sheet_name,
-            index=False, startrow=TABLE_START_ROW - 1, startcol=AFTER_START_COL - 1
-        )
-        before_aligned.to_excel(
-            writer, sheet_name=sheet_name,
-            index=False, startrow=TABLE_START_ROW - 1, startcol=before_start_col - 1
-        )
-
-    # Load workbook to apply formatting
-    wb = load_workbook(out_xlsx)
+    out_path = BASE_DIR / out_file
+    wb = open_or_create_and_clear(out_path, sheet_name)
     ws = wb[sheet_name]
 
+    # Determine maximum block width to calculate Before start col safely
+    all_tables = after_tables + before_tables
+    block_width = max((df.shape[1] for df in all_tables), default=1)
+
+    left_start_col = AFTER_START_COL
+    computed_min_before = left_start_col + block_width + COL_GAP_BETWEEN_BLOCKS
+    right_start_col = max(BEFORE_MIN_START_COL, computed_min_before)
+
     # Titles
-    ws.cell(row=TOP_TITLE_ROW, column=AFTER_START_COL, value="After_Run Results").font = TITLE_FONT
-    ws.cell(row=TOP_TITLE_ROW, column=before_start_col, value="Before_Run Results").font = TITLE_FONT
+    write_title(ws, TITLE_ROW, left_start_col, "After_Run Results")
+    write_title(ws, TITLE_ROW, right_start_col, "Before_Run Results")
 
-    ws.cell(row=SUB_TITLE_ROW, column=AFTER_START_COL, value=after_title).font = TITLE_FONT
-    ws.cell(row=SUB_TITLE_ROW, column=before_start_col, value=before_title).font = TITLE_FONT
-
-    # Header formatting
-    header_row = TABLE_START_ROW
-    for c in range(AFTER_START_COL, AFTER_START_COL + after_width):
-        ws.cell(row=header_row, column=c).font = HEADER_FONT
-        ws.cell(row=header_row, column=c).alignment = CENTER
-
-    for c in range(before_start_col, before_start_col + after_width):
-        ws.cell(row=header_row, column=c).font = HEADER_FONT
-        ws.cell(row=header_row, column=c).alignment = CENTER
-
-    # Table bounds
-    n_rows = after_aligned.shape[0]
-    total_rows = n_rows + 1  # header included
-
-    after_r1, after_r2 = header_row, header_row + total_rows - 1
-    after_c1, after_c2 = AFTER_START_COL, AFTER_START_COL + after_width - 1
-
-    before_r1, before_r2 = header_row, header_row + total_rows - 1
-    before_c1, before_c2 = before_start_col, before_start_col + after_width - 1
-
-    # Apply percent format to Avg column (3rd column)
-    avg_offset = 2
-    for r in range(header_row + 1, after_r2 + 1):
-        ws.cell(row=r, column=after_c1 + avg_offset).number_format = "0%"
-        ws.cell(row=r, column=before_c1 + avg_offset).number_format = "0%"
-
-    # Borders
-    def apply_border(r1, r2, c1, c2):
-        for rr in range(r1, r2 + 1):
-            for cc in range(c1, c2 + 1):
-                ws.cell(row=rr, column=cc).border = THIN_BORDER
-
-    apply_border(after_r1, after_r2, after_c1, after_c2)
-    apply_border(before_r1, before_r2, before_c1, before_c2)
-
-    # Auto-size columns (simple)
-    def autosize(c1, c2, last_row):
-        for cc in range(c1, c2 + 1):
-            max_len = 0
-            for rr in range(1, last_row + 1):
-                v = ws.cell(row=rr, column=cc).value
-                if v is None:
-                    continue
-                max_len = max(max_len, len(str(v)))
-            ws.column_dimensions[get_column_letter(cc)].width = min(max(12, max_len + 2), 45)
-
-    autosize(after_c1, after_c2, after_r2)
-    autosize(before_c1, before_c2, before_r2)
-
-    # Comparison highlighting (match => green, mismatch => yellow)
-    tol = 1e-9
-
-    def match(v1, v2, is_avg=False):
-        if v1 is None and v2 is None:
-            return True
-        if (v1 is None) != (v2 is None):
-            return False
-        try:
-            if pd.isna(v1) and pd.isna(v2):
-                return True
-            if pd.isna(v1) != pd.isna(v2):
-                return False
-        except Exception:
-            pass
-
-        if is_avg:
-            try:
-                return abs(float(v1) - float(v2)) <= tol
-            except Exception:
-                return str(v1) == str(v2)
-        return str(v1) == str(v2)
-
-    for i in range(n_rows):
-        rr = header_row + 1 + i
-        for j in range(after_width):
-            a_cell = ws.cell(row=rr, column=after_c1 + j)
-            b_cell = ws.cell(row=rr, column=before_c1 + j)
-
-            is_avg = (j == avg_offset)
-            is_match = match(a_cell.value, b_cell.value, is_avg=is_avg)
-            fill = LIGHT_GREEN if is_match else LIGHT_YELLOW
-
-            a_cell.fill = fill
-            b_cell.fill = fill
-
-    wb.save(out_xlsx)
-
-
-# ==========================================================
-# Main orchestration (presence rules + generate files)
-# ==========================================================
-def main(after_dir: Path, before_dir: Path):
-    # Presence checks (outer tars)
-    cnb_after = find_first_matching_tar(after_dir, "cnb_in_out_*.tar")
-    cnb_before = find_first_matching_tar(before_dir, "cnb_in_out_*.tar")
-
-    ccms_after = find_first_matching_tar(after_dir, "lgd_ccms_in_out_*.tar")
-    ccms_before = find_first_matching_tar(before_dir, "lgd_ccms_in_out_*.tar")
-
-    cms_after = find_first_matching_tar(after_dir, "lgd_commercial_in_out_*.tar")
-    cms_before = find_first_matching_tar(before_dir, "lgd_commercial_in_out_*.tar")
-
-    # -------------------- CNB --------------------
-    if cnb_after and cnb_before:
-        df_ar = load_facility_df(after_dir, "cnb_in_out_*.tar", "cnb_out_*.tar", "facility_cnb_out_*.psv")
-        df_br = load_facility_df(before_dir, "cnb_in_out_*.tar", "cnb_out_*.tar", "facility_cnb_out_*.psv")
-
-        if df_ar is None or df_br is None:
-            print("CNB: inner TAR or PSV not found in After_Run or Before_Run. CNB file not generated.")
-        else:
-            ar_pt = make_pivot(df_ar)
-            br_pt = make_pivot(df_br)
-
-            write_side_by_side_excel(
-                out_xlsx=BASE_DIR / "CNB_Facility_Validation.xlsx",
-                sheet_name="CNB_Facility_Validation",
-                after_pt=ar_pt,
-                before_pt=br_pt,
-                after_title="After Run - Facility CNB Out",
-                before_title="Before Run - Facility CNB Out",
-            )
-            print("Generated: CNB_Facility_Validation.xlsx")
+    # Reference label rows by number of tables
+    if len(after_tables) == 2:
+        ref_rows = REF_LABEL_ROWS_2
+    elif len(after_tables) == 3:
+        ref_rows = REF_LABEL_ROWS_3
     else:
-        if not cnb_after:
-            print("cnb_in_out_*.tar is absent in After_Run Folder so CNB_Facility_Validation.xlsx is not generated.")
-        if not cnb_before:
-            print("cnb_in_out_*.tar is absent in Before_Run Folder so CNB_Facility_Validation.xlsx is not generated.")
+        ref_rows = REF_LABEL_ROWS_4
 
-    # -------------------- CCMS --------------------
-    if ccms_after and ccms_before:
-        df_ar = load_facility_df(after_dir, "lgd_ccms_in_out_*.tar", "ccms_out_*.tar", "facility_ccms_out_*.psv")
-        df_br = load_facility_df(before_dir, "lgd_ccms_in_out_*.tar", "ccms_out_*.tar", "facility_ccms_out_*.psv")
+    after_ranges = []
+    before_ranges = []
 
-        if df_ar is None or df_br is None:
-            print("CCMS: inner TAR or PSV not found in After_Run or Before_Run. CCMS file not generated.")
-        else:
-            ar_pt = make_pivot(df_ar)
-            br_pt = make_pivot(df_br)
+    # Write After block with reference spacing
+    prev_bottom = 0
+    for i, df in enumerate(after_tables):
+        desired_label_row = ref_rows[i] if i < len(ref_rows) else (prev_bottom + 1 + ROW_GAP_BETWEEN_TABLES)
+        label_row = desired_label_row if prev_bottom == 0 else max(desired_label_row, prev_bottom + 1 + ROW_GAP_BETWEEN_TABLES)
 
-            write_side_by_side_excel(
-                out_xlsx=BASE_DIR / "CCMS_Facility_Validation.xlsx",
-                sheet_name="CCMS_Facility_Validation",
-                after_pt=ar_pt,
-                before_pt=br_pt,
-                after_title="After Run - Facility CCMS Out",
-                before_title="Before Run - Facility CCMS Out",
-            )
-            print("Generated: CCMS_Facility_Validation.xlsx")
-    else:
-        if not ccms_after:
-            print("lgd_ccms_in_out_*.tar is absent in After_Run Folder so CCMS_Facility_Validation.xlsx is not generated.")
-        if not ccms_before:
-            print("lgd_ccms_in_out_*.tar is absent in Before_Run Folder so CCMS_Facility_Validation.xlsx is not generated.")
+        write_section_label(ws, label_row, left_start_col, after_section_labels[i])
+        rng = write_df_values_only(ws, df, label_row + 1, left_start_col)
+        after_ranges.append(rng)
+        prev_bottom = rng[2]
 
-    # -------------------- CMS --------------------
-    if cms_after and cms_before:
-        df_ar = load_cms_facility_df(after_dir)
-        df_br = load_cms_facility_df(before_dir)
+    # Write Before block with reference spacing
+    prev_bottom = 0
+    for i, df in enumerate(before_tables):
+        desired_label_row = ref_rows[i] if i < len(ref_rows) else (prev_bottom + 1 + ROW_GAP_BETWEEN_TABLES)
+        label_row = desired_label_row if prev_bottom == 0 else max(desired_label_row, prev_bottom + 1 + ROW_GAP_BETWEEN_TABLES)
 
-        if df_ar is None or df_br is None:
-            print("CMS: cms_out/esn_out TAR or facility_cms_out PSV not found. CMS file not generated.")
-        else:
-            ar_pt = make_pivot(df_ar)
-            br_pt = make_pivot(df_br)
+        write_section_label(ws, label_row, right_start_col, before_section_labels[i])
+        rng = write_df_values_only(ws, df, label_row + 1, right_start_col)
+        before_ranges.append(rng)
+        prev_bottom = rng[2]
 
-            write_side_by_side_excel(
-                out_xlsx=BASE_DIR / "CMS_Facility_Validation.xlsx",
-                sheet_name="CMS_Facility_Validation",
-                after_pt=ar_pt,
-                before_pt=br_pt,
-                after_title="After Run - Facility CMS Out",
-                before_title="Before Run - Facility CMS Out",
-            )
-            print("Generated: CMS_Facility_Validation.xlsx")
-    else:
-        if not cms_after:
-            print("lgd_commercial_in_out_*.tar is absent in After_Run Folder so CMS_Facility_Validation.xlsx is not generated.")
-        if not cms_before:
-            print("lgd_commercial_in_out_*.tar is absent in Before_Run Folder so CMS_Facility_Validation.xlsx is not generated.")
+    # Compare & color
+    for i in range(min(len(after_ranges), len(before_ranges))):
+        compare_and_color(ws, after_ranges[i], before_ranges[i])
+
+    # Borders only within tables
+    for rng in after_ranges:
+        apply_table_cell_borders(ws, rng)
+    for rng in before_ranges:
+        apply_table_cell_borders(ws, rng)
+
+    # Autosize columns for both blocks
+    last_row = max(after_ranges[-1][2], before_ranges[-1][2]) if after_ranges and before_ranges else ws.max_row
+    autosize_columns(ws, left_start_col, left_start_col + block_width - 1, 1, last_row)
+    autosize_columns(ws, right_start_col, right_start_col + block_width - 1, 1, last_row)
+
+    wb.save(out_path)
+
+
+# =========================
+# Labels
+# =========================
+def labels_cnb(after=True):
+    if after:
+        return [
+            "After Run - Error Summary CNB Out File",
+            "After Run - Summary Count CNB Out File",
+            "After Run - Facility CNB Out",
+        ]
+    return [
+        "Before Run - Error Summary CNB Out File",
+        "Before Run - Summary Count CNB Out File",
+        "Before Run - Facility CNB Out",
+    ]
+
+
+def labels_ccms(after=True):
+    if after:
+        return [
+            "After Run - Error Summary CCMS Out File",
+            "After Run - Summary CCMS Out File",
+            "After Run - Summary Count CCMS Out File",
+            "After Run - Facility CCMS Out",
+        ]
+    return [
+        "Before Run - Error Summary CCMS Out File",
+        "Before Run - Summary CCMS Out File",
+        "Before Run - Summary Count CCMS Out File",
+        "Before Run - Facility CCMS Out",
+    ]
+
+
+def labels_cms(after=True):
+    if after:
+        return [
+            "After Run - Error Summary CMS Out File",
+            "After Run - Summary CMS Out File",
+            "After Run - Summary Count CMS Out File",
+            "After Run - Facility CMS Out",
+        ]
+    return [
+        "Before Run - Error Summary CMS Out File",
+        "Before Run - Summary CMS Out File",
+        "Before Run - Summary Count CMS Out File",
+        "Before Run - Facility CMS Out",
+    ]
+
+
+# =========================
+# Context 8 (After + Before presence validation)
+# =========================
+def can_generate(prefix: str, excel_name: str) -> bool:
+    """
+    Generate report ONLY if the outer tar exists in BOTH After_Run and Before_Run.
+    If missing, print required terminal message(s).
+    """
+    after_ok = tar_present_by_prefix(AFTER_DIR, prefix)
+    before_ok = tar_present_by_prefix(BEFORE_DIR, prefix)
+
+    if after_ok and before_ok:
+        return True
+
+    if not after_ok:
+        print(f"❌ {prefix}_*.tar tar is absent in After_Run Folder so {excel_name} excel file is not generated.")
+    if not before_ok:
+        print(f"❌ {prefix}_*.tar tar is absent in Before_Run Folder so {excel_name} excel file is not generated.")
+    return False
+
+
+# =========================
+# Main
+# =========================
+def main():
+    # CNB
+    if can_generate(CNB_OUTER_PREFIX, "CNB_Validation.xlsx"):
+        # Existing files (preserve shape)
+        df_ar_cnb_es, df_ar_cnb_sc = load_psv_dfs_from_run(
+            AFTER_DIR, CNB_OUTER_PREFIX, CNB_INNER_OUT_PREFIX, cnb_list
+        )
+        df_br_cnb_es, df_br_cnb_sc = load_psv_dfs_from_run(
+            BEFORE_DIR, CNB_OUTER_PREFIX, CNB_INNER_OUT_PREFIX, cnb_list
+        )
+
+        # NEW facility DF + pivot
+        df_ar_facility_cnb_out = load_facility_df_from_run(
+            AFTER_DIR, CNB_OUTER_PREFIX, CNB_INNER_OUT_PREFIX, facility_cnb_pattern
+        )
+        df_br_facility_cnb_out = load_facility_df_from_run(
+            BEFORE_DIR, CNB_OUTER_PREFIX, CNB_INNER_OUT_PREFIX, facility_cnb_pattern
+        )
+
+        df_ar_facility_cnb_out_pt = build_facility_pivot(df_ar_facility_cnb_out)
+        df_br_facility_cnb_out_pt = build_facility_pivot(df_br_facility_cnb_out)
+
+        # Convert pivot to display tables with header row included
+        df_ar_facility_cnb_out_pt_disp = df_with_header_row(df_ar_facility_cnb_out_pt)
+        df_br_facility_cnb_out_pt_disp = df_with_header_row(df_br_facility_cnb_out_pt)
+
+        build_validation_excel(
+            out_file="CNB_Validation.xlsx",
+            sheet_name="CNB_Validation",
+            after_tables=[df_ar_cnb_es, df_ar_cnb_sc, df_ar_facility_cnb_out_pt_disp],
+            before_tables=[df_br_cnb_es, df_br_cnb_sc, df_br_facility_cnb_out_pt_disp],
+            after_section_labels=labels_cnb(after=True),
+            before_section_labels=labels_cnb(after=False),
+        )
+        print("✅ Generated CNB_Validation.xlsx")
+
+    # CCMS
+    if can_generate(CCMS_OUTER_PREFIX, "CCMS_Validation.xlsx"):
+        # Existing files (preserve shape)
+        df_ar_ccms_es, df_ar_ccms_sc, df_ar_ccms_scc = load_psv_dfs_from_run(
+            AFTER_DIR, CCMS_OUTER_PREFIX, CCMS_INNER_OUT_PREFIX, ccms_list
+        )
+        df_br_ccms_es, df_br_ccms_sc, df_br_ccms_scc = load_psv_dfs_from_run(
+            BEFORE_DIR, CCMS_OUTER_PREFIX, CCMS_INNER_OUT_PREFIX, ccms_list
+        )
+
+        # NEW facility DF + pivot
+        df_ar_facility_ccms_out = load_facility_df_from_run(
+            AFTER_DIR, CCMS_OUTER_PREFIX, CCMS_INNER_OUT_PREFIX, facility_ccms_pattern
+        )
+        df_br_facility_ccms_out = load_facility_df_from_run(
+            BEFORE_DIR, CCMS_OUTER_PREFIX, CCMS_INNER_OUT_PREFIX, facility_ccms_pattern
+        )
+
+        df_ar_facility_ccms_out_pt = build_facility_pivot(df_ar_facility_ccms_out)
+        df_br_facility_ccms_out_pt = build_facility_pivot(df_br_facility_ccms_out)
+
+        df_ar_facility_ccms_out_pt_disp = df_with_header_row(df_ar_facility_ccms_out_pt)
+        df_br_facility_ccms_out_pt_disp = df_with_header_row(df_br_facility_ccms_out_pt)
+
+        build_validation_excel(
+            out_file="CCMS_Validation.xlsx",
+            sheet_name="CCMS_Validation",
+            after_tables=[df_ar_ccms_es, df_ar_ccms_sc, df_ar_ccms_scc, df_ar_facility_ccms_out_pt_disp],
+            before_tables=[df_br_ccms_es, df_br_ccms_sc, df_br_ccms_scc, df_br_facility_ccms_out_pt_disp],
+            after_section_labels=labels_ccms(after=True),
+            before_section_labels=labels_ccms(after=False),
+        )
+        print("✅ Generated CCMS_Validation.xlsx")
+
+    # CMS (Commercial)
+    if can_generate(COMM_OUTER_PREFIX, "CMS_Validation.xlsx"):
+        # Existing files (preserve shape)
+        df_ar_cms_es, df_ar_cms_sc, df_ar_cms_scc = load_psv_dfs_from_run(
+            AFTER_DIR, COMM_OUTER_PREFIX, [CMS_INNER_OUT_PREFIX, ESN_INNER_OUT_PREFIX], cms_list
+        )
+        df_br_cms_es, df_br_cms_sc, df_br_cms_scc = load_psv_dfs_from_run(
+            BEFORE_DIR, COMM_OUTER_PREFIX, [CMS_INNER_OUT_PREFIX, ESN_INNER_OUT_PREFIX], cms_list
+        )
+
+        # NEW facility DF + pivot (search in cms_out and esn_out extractions)
+        df_ar_facility_cms_out = load_facility_df_from_run(
+            AFTER_DIR, COMM_OUTER_PREFIX, [CMS_INNER_OUT_PREFIX, ESN_INNER_OUT_PREFIX], facility_cms_pattern
+        )
+        df_br_facility_cms_out = load_facility_df_from_run(
+            BEFORE_DIR, COMM_OUTER_PREFIX, [CMS_INNER_OUT_PREFIX, ESN_INNER_OUT_PREFIX], facility_cms_pattern
+        )
+
+        df_ar_facility_cms_out_pt = build_facility_pivot(df_ar_facility_cms_out)
+        df_br_facility_cms_out_pt = build_facility_pivot(df_br_facility_cms_out)
+
+        df_ar_facility_cms_out_pt_disp = df_with_header_row(df_ar_facility_cms_out_pt)
+        df_br_facility_cms_out_pt_disp = df_with_header_row(df_br_facility_cms_out_pt)
+
+        build_validation_excel(
+            out_file="CMS_Validation.xlsx",
+            sheet_name="CMS_Validation",
+            after_tables=[df_ar_cms_es, df_ar_cms_sc, df_ar_cms_scc, df_ar_facility_cms_out_pt_disp],
+            before_tables=[df_br_cms_es, df_br_cms_sc, df_br_cms_scc, df_br_facility_cms_out_pt_disp],
+            after_section_labels=labels_cms(after=True),
+            before_section_labels=labels_cms(after=False),
+        )
+        print("✅ Generated CMS_Validation.xlsx")
 
 
 if __name__ == "__main__":
-    main(AFTER_DIR, BEFORE_DIR)
+    main()
