@@ -1,6 +1,7 @@
 import tarfile
 import tempfile
 from pathlib import Path
+import re
 
 import pandas as pd
 from openpyxl import Workbook, load_workbook
@@ -9,8 +10,11 @@ from openpyxl.utils import get_column_letter
 
 
 # ==========================================================
-# Base directory (works even if you run from elsewhere)
+# Config
 # ==========================================================
+DEBUG = True  # Prints selected dataframes to console for debugging
+
+# Base directory (works even if you run from elsewhere)
 BASE_DIR = Path(__file__).resolve().parent
 AFTER_DIR = BASE_DIR / "After_Run"
 BEFORE_DIR = BASE_DIR / "Before_Run"
@@ -62,19 +66,15 @@ ESN_INNER_OUT_PREFIX = "esn_out"
 # Excel layout rules (reference format)
 # =========================
 AFTER_START_COL = 1          # A
-BEFORE_MIN_START_COL = 10    # J (as per reference)
+BEFORE_MIN_START_COL = 10    # J
 COL_GAP_BETWEEN_BLOCKS = 2   # 2 blank columns between blocks
 ROW_GAP_BETWEEN_TABLES = 3   # 3 row gap between tables
 
 TITLE_ROW = 1
-
-# Reference slots:
-# - 2 tables: CNB old
-# - 3 tables: CNB new (adds Facility PT)
-# - 4 tables: CCMS/CMS new (adds Facility PT)
-REF_LABEL_ROWS_2 = [3, 12]
-REF_LABEL_ROWS_3 = [3, 12, 19]
-REF_LABEL_ROWS_4 = [3, 12, 19, 26]
+# Reference label rows
+REF_LABEL_ROWS_2 = [3, 12]              # CNB (old)
+REF_LABEL_ROWS_3 = [3, 12, 20]          # CNB (with Facility) -> aligns with sample image
+REF_LABEL_ROWS_4 = [3, 12, 19, 26]      # CCMS/CMS (with Facility)
 
 
 # =========================
@@ -84,11 +84,9 @@ TITLE_FONT = Font(bold=True, size=12)
 BOLD = Font(bold=True)
 ALIGN_LEFT = Alignment(horizontal="left", vertical="center", wrap_text=False)
 
-# Context 8 coloring:
 MATCH_FILL = PatternFill("solid", fgColor="C6EFCE")  # light green
 DIFF_FILL = PatternFill("solid", fgColor="FFF2CC")   # light yellow
 
-# Borders only within table ranges (grid like sample)
 thin = Side(style="thin", color="000000")
 CELL_BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
 
@@ -109,9 +107,7 @@ def tar_present_by_prefix(folder: Path, prefix: str) -> bool:
 
 
 def find_by_prefix(folder: Path, prefix: str) -> Path:
-    """
-    Pick newest file under folder that starts with prefix and ends with .tar/.tar.gz/.tgz
-    """
+    """Pick newest file under folder that starts with prefix and ends with .tar/.tar.gz/.tgz"""
     candidates = [
         p for p in folder.iterdir()
         if p.is_file() and p.name.startswith(prefix) and p.name.endswith(TAR_SUFFIXES)
@@ -129,9 +125,7 @@ def find_by_prefix(folder: Path, prefix: str) -> Path:
 
 
 def find_inside_extracted(root: Path, prefix: str) -> Path:
-    """
-    Find newest inner tar recursively inside extracted outer tar folder.
-    """
+    """Find newest inner tar recursively inside extracted outer tar folder."""
     matches = [
         p for p in root.rglob("*")
         if p.is_file() and p.name.startswith(prefix) and p.name.endswith(TAR_SUFFIXES)
@@ -162,12 +156,9 @@ def extract_tar(tar_path: Path, extract_to: Path) -> None:
 # =========================
 # PSV parsing
 # =========================
+
 def read_psv_preserve_shape(psv_path: Path) -> pd.DataFrame:
-    """
-    Existing behavior:
-    Split each line by literal '|', pad rows to max columns.
-    No header inference; keeps file rows/cols as-is.
-    """
+    """Split each line by literal '|', pad rows to max columns. No header inference."""
     lines = psv_path.read_text(encoding="utf-8", errors="replace").splitlines()
     rows = [line.split("|") for line in lines]
     max_len = max((len(r) for r in rows), default=0)
@@ -176,11 +167,7 @@ def read_psv_preserve_shape(psv_path: Path) -> pd.DataFrame:
 
 
 def read_psv_with_header(psv_path: Path) -> pd.DataFrame:
-    """
-    NEW behavior for facility files:
-    Read PSV using '|' delimiter and treat first line as header.
-    Keeps columns & rows as-is; avoids NA conversion.
-    """
+    """Read PSV using '|' delimiter and treat first line as header (facility files)."""
     df = pd.read_csv(
         psv_path,
         sep="|",
@@ -189,16 +176,12 @@ def read_psv_with_header(psv_path: Path) -> pd.DataFrame:
         dtype=str,
         keep_default_na=False,
     )
-    # normalize column names (strip spaces)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
 def load_psv_dfs_from_run(run_folder: Path, outer_prefix: str, inner_prefixes, psv_patterns):
-    """
-    Extract outer tar by prefix -> extract inner tar(s) by prefix -> read PSV(s) by wildcard.
-    Uses preserve-shape reading (existing files).
-    """
+    """Extract outer tar -> extract inner tar(s) -> read PSV(s) (preserve-shape)."""
     outer_tar = find_by_prefix(run_folder, outer_prefix)
 
     tmpdir = tempfile.TemporaryDirectory()
@@ -232,10 +215,7 @@ def load_psv_dfs_from_run(run_folder: Path, outer_prefix: str, inner_prefixes, p
 
 
 def load_facility_df_from_run(run_folder: Path, outer_prefix: str, inner_prefixes, facility_pattern: str) -> pd.DataFrame:
-    """
-    NEW:
-    Extract outer tar by prefix -> extract inner tar(s) by prefix -> read facility PSV by wildcard with header.
-    """
+    """Extract outer tar -> extract inner tar(s) -> read facility PSV with header."""
     outer_tar = find_by_prefix(run_folder, outer_prefix)
 
     tmpdir = tempfile.TemporaryDirectory()
@@ -266,68 +246,104 @@ def load_facility_df_from_run(run_folder: Path, outer_prefix: str, inner_prefixe
 
 
 # =========================
-# Pivot table builder (Facility)
+# Facility pivot builder (robust column mapping)
 # =========================
-def build_facility_pivot(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Input DF has headers and includes:
-      FacilityID, FinalSegmentID, FinalLGDRate
 
-    Output pivot DF:
-      Final Segment ID | Count of Facility ID | Average Final LGD Rate
-    Average is percentage (string with %).
-    """
-    required = {"FacilityID", "FinalSegmentID", "FinalLGDRate"}
-    missing = required - set(df.columns)
+def _norm_col(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
+
+
+def _resolve_required_cols(df: pd.DataFrame):
+    """Resolve actual column names for FacilityID, SegmentID, LGDRate even if headers vary."""
+    norm_map = {_norm_col(c): c for c in df.columns}
+
+    facility_keys = ["facilityid", "facility_id", "facility id"]
+    segment_keys = [
+        "finalsegmentid", "final_segment_id", "final segment id",
+        "segmentid", "segment_id", "segment id",
+        "segment", "segmentidentifier"
+    ]
+    rate_keys = [
+        "finallgdrate", "final_lgd_rate", "final lgd rate",
+        "lgdrate", "lgd rate", "finalrate", "rate"
+    ]
+
+    def pick(keys):
+        for k in keys:
+            nk = _norm_col(k)
+            if nk in norm_map:
+                return norm_map[nk]
+        return None
+
+    facility_col = pick(facility_keys)
+    segment_col = pick(segment_keys)
+    rate_col = pick(rate_keys)
+
+    missing = []
+    if facility_col is None:
+        missing.append("FacilityID (or similar)")
+    if segment_col is None:
+        missing.append("FinalSegmentID/Segment ID (or similar)")
+    if rate_col is None:
+        missing.append("FinalLGDRate (or similar)")
+
     if missing:
-        raise ValueError(f"Facility file missing required columns: {sorted(missing)}. Found: {list(df.columns)}")
+        raise ValueError(
+            "Facility file missing required columns.\n"
+            f"Missing: {missing}\n"
+            f"Found columns: {list(df.columns)}"
+        )
 
-    work = df[["FacilityID", "FinalSegmentID", "FinalLGDRate"]].copy()
+    return facility_col, segment_col, rate_col
 
-    # Clean rate to numeric
-    rate = work["FinalLGDRate"].astype(str).str.strip()
+
+def build_facility_pivot(df: pd.DataFrame) -> pd.DataFrame:
+    """Create pivot-like summary per Segment ID with count and average LGD% (whole percent)."""
+    facility_col, segment_col, rate_col = _resolve_required_cols(df)
+
+    work = df[[facility_col, segment_col, rate_col]].copy()
+
+    rate = work[rate_col].astype(str).str.strip()
     rate = rate.str.replace("%", "", regex=False)
+    rate = rate.str.replace(",", "", regex=False)
     rate_num = pd.to_numeric(rate, errors="coerce")
 
-    # Heuristic: if rates look like fractions (<= 1.5), convert to percent
     max_rate = rate_num.max(skipna=True)
     if pd.notna(max_rate) and max_rate <= 1.5:
         rate_num = rate_num * 100.0
 
     work["__rate_num__"] = rate_num
 
-    # Group
     pt = (
-        work.groupby("FinalSegmentID", dropna=False)
+        work.groupby(segment_col, dropna=False)
         .agg(
             **{
-                "Count of Facility ID": ("FacilityID", "count"),
-                "Average Final LGD Rate": ("__rate_num__", "mean"),
+                "Count of FacilityID": (facility_col, "count"),
+                "Average of FinalLGDRate": ("__rate_num__", "mean"),
             }
         )
         .reset_index()
+        .rename(columns={segment_col: "Segment ID"})
     )
 
-    # Rename first column
-    pt = pt.rename(columns={"FinalSegmentID": "Final Segment ID"})
-
-    # Format average as percentage string (2 decimals)
-    pt["Average Final LGD Rate"] = pt["Average Final LGD Rate"].map(
-        lambda x: "" if pd.isna(x) else f"{x:.2f}%"
+    pt["Average of FinalLGDRate"] = pt["Average of FinalLGDRate"].map(
+        lambda x: "" if pd.isna(x) else f"{round(x):.0f}%"
     )
 
-    # Ensure consistent ordering (optional)
-    pt["Final Segment ID"] = pt["Final Segment ID"].astype(str)
-    pt = pt.sort_values("Final Segment ID", kind="stable").reset_index(drop=True)
+    # Sort Segment ID as numeric when possible, else as string
+    def _seg_sort_key(v):
+        try:
+            return (0, int(str(v)))
+        except Exception:
+            return (1, str(v))
+
+    pt = pt.sort_values(by="Segment ID", key=lambda s: s.map(_seg_sort_key), kind="stable").reset_index(drop=True)
 
     return pt
 
 
 def df_with_header_row(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Because the Excel writer writes "values only" (no headers),
-    this converts a dataframe into a display dataframe with the header as the first row.
-    """
+    """Convert DF to a display DF that includes header as first row (because Excel writer writes values only)."""
     header = [list(df.columns)]
     body = df.astype(object).values.tolist()
     return pd.DataFrame(header + body)
@@ -336,11 +352,9 @@ def df_with_header_row(df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 # Excel helpers
 # =========================
+
 def open_or_create_and_clear(filepath: Path, sheet_name: str):
-    """
-    If file exists -> open workbook -> remove all sheets -> create fresh sheet
-    Else -> create new workbook with only that sheet
-    """
+    """If file exists -> open -> remove all sheets -> create fresh sheet. Else create new workbook."""
     if filepath.exists():
         wb = load_workbook(filepath)
         for s in list(wb.sheetnames):
@@ -378,10 +392,7 @@ def write_section_label(ws, row: int, col: int, text: str):
 
 
 def write_df_values_only(ws, df: pd.DataFrame, start_row: int, start_col: int):
-    """
-    Write DF values only (no implicit headers).
-    Returns range: (top, left, bottom, right)
-    """
+    """Write DF values only. Returns (top,left,bottom,right)."""
     nrows, ncols = df.shape
     for i in range(nrows):
         for j in range(ncols):
@@ -395,10 +406,7 @@ def write_df_values_only(ws, df: pd.DataFrame, start_row: int, start_col: int):
 
 
 def apply_table_cell_borders(ws, rng):
-    """
-    Apply borders ONLY to cells inside the dataframe/table range (grid like sample).
-    No borders outside the table.
-    """
+    """Apply borders only inside the table range."""
     top, left, bottom, right = rng
     for r in range(top, bottom + 1):
         for c in range(left, right + 1):
@@ -406,12 +414,7 @@ def apply_table_cell_borders(ws, rng):
 
 
 def compare_and_color(ws, rng_after, rng_before):
-    """
-    Context 8:
-    - Match -> light green
-    - Diff  -> light yellow
-    Apply to BOTH sides.
-    """
+    """Match -> green, Diff -> yellow. Apply to both sides."""
     a_top, a_left, a_bottom, a_right = rng_after
     b_top, b_left, b_bottom, b_right = rng_before
 
@@ -451,13 +454,12 @@ def build_validation_excel(
     after_tables: list,
     before_tables: list,
     after_section_labels: list,
-    before_section_labels: list
+    before_section_labels: list,
 ):
     out_path = BASE_DIR / out_file
     wb = open_or_create_and_clear(out_path, sheet_name)
     ws = wb[sheet_name]
 
-    # Determine maximum block width to calculate Before start col safely
     all_tables = after_tables + before_tables
     block_width = max((df.shape[1] for df in all_tables), default=1)
 
@@ -480,7 +482,7 @@ def build_validation_excel(
     after_ranges = []
     before_ranges = []
 
-    # Write After block with reference spacing
+    # After
     prev_bottom = 0
     for i, df in enumerate(after_tables):
         desired_label_row = ref_rows[i] if i < len(ref_rows) else (prev_bottom + 1 + ROW_GAP_BETWEEN_TABLES)
@@ -491,7 +493,7 @@ def build_validation_excel(
         after_ranges.append(rng)
         prev_bottom = rng[2]
 
-    # Write Before block with reference spacing
+    # Before
     prev_bottom = 0
     for i, df in enumerate(before_tables):
         desired_label_row = ref_rows[i] if i < len(ref_rows) else (prev_bottom + 1 + ROW_GAP_BETWEEN_TABLES)
@@ -502,17 +504,17 @@ def build_validation_excel(
         before_ranges.append(rng)
         prev_bottom = rng[2]
 
-    # Compare & color
+    # Compare + color
     for i in range(min(len(after_ranges), len(before_ranges))):
         compare_and_color(ws, after_ranges[i], before_ranges[i])
 
-    # Borders only within tables
+    # Borders
     for rng in after_ranges:
         apply_table_cell_borders(ws, rng)
     for rng in before_ranges:
         apply_table_cell_borders(ws, rng)
 
-    # Autosize columns for both blocks
+    # Autosize columns
     last_row = max(after_ranges[-1][2], before_ranges[-1][2]) if after_ranges and before_ranges else ws.max_row
     autosize_columns(ws, left_start_col, left_start_col + block_width - 1, 1, last_row)
     autosize_columns(ws, right_start_col, right_start_col + block_width - 1, 1, last_row)
@@ -523,6 +525,7 @@ def build_validation_excel(
 # =========================
 # Labels
 # =========================
+
 def labels_cnb(after=True):
     if after:
         return [
@@ -542,14 +545,14 @@ def labels_ccms(after=True):
         return [
             "After Run - Error Summary CCMS Out File",
             "After Run - Summary CCMS Out File",
-            "After Run - Summary Count CCMS Out File",
             "After Run - Facility CCMS Out",
+            "After Run - Summary Count CCMS Out File",
         ]
     return [
         "Before Run - Error Summary CCMS Out File",
         "Before Run - Summary CCMS Out File",
-        "Before Run - Summary Count CCMS Out File",
         "Before Run - Facility CCMS Out",
+        "Before Run - Summary Count CCMS Out File",
     ]
 
 
@@ -558,25 +561,23 @@ def labels_cms(after=True):
         return [
             "After Run - Error Summary CMS Out File",
             "After Run - Summary CMS Out File",
-            "After Run - Summary Count CMS Out File",
             "After Run - Facility CMS Out",
+            "After Run - Summary Count CMS Out File",
         ]
     return [
         "Before Run - Error Summary CMS Out File",
         "Before Run - Summary CMS Out File",
-        "Before Run - Summary Count CMS Out File",
         "Before Run - Facility CMS Out",
+        "Before Run - Summary Count CMS Out File",
     ]
 
 
 # =========================
-# Context 8 (After + Before presence validation)
+# Presence validation
 # =========================
+
 def can_generate(prefix: str, excel_name: str) -> bool:
-    """
-    Generate report ONLY if the outer tar exists in BOTH After_Run and Before_Run.
-    If missing, print required terminal message(s).
-    """
+    """Generate report ONLY if outer tar exists in BOTH After_Run and Before_Run."""
     after_ok = tar_present_by_prefix(AFTER_DIR, prefix)
     before_ok = tar_present_by_prefix(BEFORE_DIR, prefix)
 
@@ -593,10 +594,10 @@ def can_generate(prefix: str, excel_name: str) -> bool:
 # =========================
 # Main
 # =========================
+
 def main():
     # CNB
     if can_generate(CNB_OUTER_PREFIX, "CNB_Validation.xlsx"):
-        # Existing files (preserve shape)
         df_ar_cnb_es, df_ar_cnb_sc = load_psv_dfs_from_run(
             AFTER_DIR, CNB_OUTER_PREFIX, CNB_INNER_OUT_PREFIX, cnb_list
         )
@@ -604,7 +605,6 @@ def main():
             BEFORE_DIR, CNB_OUTER_PREFIX, CNB_INNER_OUT_PREFIX, cnb_list
         )
 
-        # NEW facility DF + pivot
         df_ar_facility_cnb_out = load_facility_df_from_run(
             AFTER_DIR, CNB_OUTER_PREFIX, CNB_INNER_OUT_PREFIX, facility_cnb_pattern
         )
@@ -612,10 +612,22 @@ def main():
             BEFORE_DIR, CNB_OUTER_PREFIX, CNB_INNER_OUT_PREFIX, facility_cnb_pattern
         )
 
+        if DEBUG:
+            print("\n========== DEBUG: df_ar_facility_cnb_out ==========")
+            print("Shape:", df_ar_facility_cnb_out.shape)
+            print("Columns:", list(df_ar_facility_cnb_out.columns))
+            print(df_ar_facility_cnb_out.head(30).to_string(index=False))
+
         df_ar_facility_cnb_out_pt = build_facility_pivot(df_ar_facility_cnb_out)
         df_br_facility_cnb_out_pt = build_facility_pivot(df_br_facility_cnb_out)
 
-        # Convert pivot to display tables with header row included
+        if DEBUG:
+            print("\n========== DEBUG: df_ar_facility_cnb_out_pt ==========")
+            print("Shape:", df_ar_facility_cnb_out_pt.shape)
+            print("Columns:", list(df_ar_facility_cnb_out_pt.columns))
+            print(df_ar_facility_cnb_out_pt.head(60).to_string(index=False))
+
+        # Display DFs (include header row)
         df_ar_facility_cnb_out_pt_disp = df_with_header_row(df_ar_facility_cnb_out_pt)
         df_br_facility_cnb_out_pt_disp = df_with_header_row(df_br_facility_cnb_out_pt)
 
@@ -631,7 +643,6 @@ def main():
 
     # CCMS
     if can_generate(CCMS_OUTER_PREFIX, "CCMS_Validation.xlsx"):
-        # Existing files (preserve shape)
         df_ar_ccms_es, df_ar_ccms_sc, df_ar_ccms_scc = load_psv_dfs_from_run(
             AFTER_DIR, CCMS_OUTER_PREFIX, CCMS_INNER_OUT_PREFIX, ccms_list
         )
@@ -639,7 +650,6 @@ def main():
             BEFORE_DIR, CCMS_OUTER_PREFIX, CCMS_INNER_OUT_PREFIX, ccms_list
         )
 
-        # NEW facility DF + pivot
         df_ar_facility_ccms_out = load_facility_df_from_run(
             AFTER_DIR, CCMS_OUTER_PREFIX, CCMS_INNER_OUT_PREFIX, facility_ccms_pattern
         )
@@ -653,11 +663,12 @@ def main():
         df_ar_facility_ccms_out_pt_disp = df_with_header_row(df_ar_facility_ccms_out_pt)
         df_br_facility_ccms_out_pt_disp = df_with_header_row(df_br_facility_ccms_out_pt)
 
+        # Order: Error Summary, Summary, Facility, Summary Count (as per requirement)
         build_validation_excel(
             out_file="CCMS_Validation.xlsx",
             sheet_name="CCMS_Validation",
-            after_tables=[df_ar_ccms_es, df_ar_ccms_sc, df_ar_ccms_scc, df_ar_facility_ccms_out_pt_disp],
-            before_tables=[df_br_ccms_es, df_br_ccms_sc, df_br_ccms_scc, df_br_facility_ccms_out_pt_disp],
+            after_tables=[df_ar_ccms_es, df_ar_ccms_sc, df_ar_facility_ccms_out_pt_disp, df_ar_ccms_scc],
+            before_tables=[df_br_ccms_es, df_br_ccms_sc, df_br_facility_ccms_out_pt_disp, df_br_ccms_scc],
             after_section_labels=labels_ccms(after=True),
             before_section_labels=labels_ccms(after=False),
         )
@@ -665,7 +676,6 @@ def main():
 
     # CMS (Commercial)
     if can_generate(COMM_OUTER_PREFIX, "CMS_Validation.xlsx"):
-        # Existing files (preserve shape)
         df_ar_cms_es, df_ar_cms_sc, df_ar_cms_scc = load_psv_dfs_from_run(
             AFTER_DIR, COMM_OUTER_PREFIX, [CMS_INNER_OUT_PREFIX, ESN_INNER_OUT_PREFIX], cms_list
         )
@@ -673,7 +683,6 @@ def main():
             BEFORE_DIR, COMM_OUTER_PREFIX, [CMS_INNER_OUT_PREFIX, ESN_INNER_OUT_PREFIX], cms_list
         )
 
-        # NEW facility DF + pivot (search in cms_out and esn_out extractions)
         df_ar_facility_cms_out = load_facility_df_from_run(
             AFTER_DIR, COMM_OUTER_PREFIX, [CMS_INNER_OUT_PREFIX, ESN_INNER_OUT_PREFIX], facility_cms_pattern
         )
@@ -687,11 +696,12 @@ def main():
         df_ar_facility_cms_out_pt_disp = df_with_header_row(df_ar_facility_cms_out_pt)
         df_br_facility_cms_out_pt_disp = df_with_header_row(df_br_facility_cms_out_pt)
 
+        # Order: Error Summary, Summary, Facility, Summary Count (as per requirement)
         build_validation_excel(
             out_file="CMS_Validation.xlsx",
             sheet_name="CMS_Validation",
-            after_tables=[df_ar_cms_es, df_ar_cms_sc, df_ar_cms_scc, df_ar_facility_cms_out_pt_disp],
-            before_tables=[df_br_cms_es, df_br_cms_sc, df_br_cms_scc, df_br_facility_cms_out_pt_disp],
+            after_tables=[df_ar_cms_es, df_ar_cms_sc, df_ar_facility_cms_out_pt_disp, df_ar_cms_scc],
+            before_tables=[df_br_cms_es, df_br_cms_sc, df_br_facility_cms_out_pt_disp, df_br_cms_scc],
             after_section_labels=labels_cms(after=True),
             before_section_labels=labels_cms(after=False),
         )
