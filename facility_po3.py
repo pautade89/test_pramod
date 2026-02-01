@@ -69,13 +69,11 @@ ROW_GAP_BETWEEN_TABLES = 3   # 3 row gap between tables
 
 TITLE_ROW = 1
 
-# Reference label rows
-# CNB has 3 tables (Error Summary, Summary Count, Facility Pivot)
-# CCMS has 5 tables now (Error Summary, Summary, Summary Count, Facility Pivot, Business Rule)
-# CMS has 4 tables (Error Summary, Summary, Summary Count, Facility Pivot)
+# Reference label rows (used when tables fit into expected slots)
 REF_LABEL_ROWS_2 = [3, 12]
-REF_LABEL_ROWS_3 = [3, 12, 20]
-REF_LABEL_ROWS_4 = [3, 12, 19, 26]
+REF_LABEL_ROWS_3 = [3, 12, 20]            # CNB
+REF_LABEL_ROWS_4 = [3, 12, 19, 26]        # CMS, CCMS without business rule
+REF_LABEL_ROWS_5 = [3, 12, 19, 26, 33]    # CCMS with business rule table
 
 
 # =========================
@@ -86,8 +84,12 @@ BOLD = Font(bold=True)
 ALIGN_LEFT = Alignment(horizontal="left", vertical="center", wrap_text=False)
 ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=False)
 
+# Run-to-run comparison coloring:
 MATCH_FILL = PatternFill("solid", fgColor="C6EFCE")  # light green
 DIFF_FILL = PatternFill("solid", fgColor="FFF2CC")   # light yellow
+
+# Business-rule mismatch coloring:
+RULE_DIFF_FILL = PatternFill("solid", fgColor="FFC7CE")  # light red
 
 thin = Side(style="thin", color="000000")
 CELL_BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -331,6 +333,7 @@ def _resolve_required_cols(df: pd.DataFrame):
 
 
 def build_facility_pivot(df: pd.DataFrame) -> pd.DataFrame:
+    """Segment-wise count and avg LGD (formatted %)."""
     facility_col, segment_col, rate_col = _resolve_required_cols(df)
 
     work = df[[facility_col, segment_col, rate_col]].copy()
@@ -388,46 +391,13 @@ def df_with_header_row(df: pd.DataFrame) -> pd.DataFrame:
 def business_rule_ccms_df() -> pd.DataFrame:
     """Standard LGD rates segment-wise for CCMS/CMS (Basel IV) as provided."""
     rules = [
-        (10, "10%"),
-        (11, "15%"),
-        (12, "40%"),
-        (14, "60%"),
-        (15, "75%"),
-        (16, "35%"),
-        (17, "50%"),
-        (18, "45%"),
-        (19, "60%"),
-        (3, "40%"),
-        (1, "55%"),
-        (2, "60%"),
-        (13, "30%"),
-        (20, "15%"),
-        (26, "35%"),
-        (25, "55%"),
-        (23, "30%"),
-        (21, "20%"),
-        (22, "40%"),
-        (30, "30%"),
-        (65, "40%"),
-        (64, "65%"),
-        (34, "35%"),
-        (33, "40%"),
-        (43, "20%"),
-        (44, "25%"),
-        (45, "30%"),
-        (46, "35%"),
-        (50, "40%"),
-        (51, "30%"),
-        (52, "20%"),
-        (53, "40%"),
-        (54, "60%"),
-        (60, "6%"),
-        (61, "15%"),
-        (63, "30%"),
-        (70, "45%"),
-        (97, "Blended (variable)"),
-        (98, "99%"),
-        (99, "40%"),
+        (10, "10%"), (11, "15%"), (12, "40%"), (14, "60%"), (15, "75%"), (16, "35%"),
+        (17, "50%"), (18, "45%"), (19, "60%"), (3, "40%"), (1, "55%"), (2, "60%"),
+        (13, "30%"), (20, "15%"), (26, "35%"), (25, "55%"), (23, "30%"), (21, "20%"),
+        (22, "40%"), (30, "30%"), (65, "40%"), (64, "65%"), (34, "35%"), (33, "40%"),
+        (43, "20%"), (44, "25%"), (45, "30%"), (46, "35%"), (50, "40%"), (51, "30%"),
+        (52, "20%"), (53, "40%"), (54, "60%"), (60, "6%"), (61, "15%"), (63, "30%"),
+        (70, "45%"), (97, "Blended (variable)"), (98, "99%"), (99, "40%"),
     ]
 
     data = []
@@ -435,6 +405,11 @@ def business_rule_ccms_df() -> pd.DataFrame:
         data.append([i, seg, rate])
 
     return pd.DataFrame(data, columns=["Sr No", "Segment ID", "LGD Rate"])
+
+
+def business_rule_ccms_map() -> dict:
+    df = business_rule_ccms_df()
+    return {int(s): str(r) for s, r in zip(df["Segment ID"], df["LGD Rate"])}
 
 
 # =========================
@@ -502,6 +477,7 @@ def apply_table_cell_borders(ws, rng):
 
 
 def compare_and_color(ws, rng_after, rng_before):
+    """Run-to-run comparison: Match -> green, Diff -> yellow. Apply to both sides."""
     a_top, a_left, a_bottom, a_right = rng_after
     b_top, b_left, b_bottom, b_right = rng_before
 
@@ -535,6 +511,98 @@ def compare_and_color(ws, rng_after, rng_before):
                 ws.cell(b_r, b_c).fill = fill
 
 
+def _parse_segment_id(val):
+    if val is None:
+        return None
+    s = str(val).strip()
+    if s == "":
+        return None
+    try:
+        return int(float(s))
+    except Exception:
+        return None
+
+
+def _norm_percent_str(val: str) -> str:
+    """Normalize percent strings like '60', '60%', '60.0%' -> '60%'."""
+    if val is None:
+        return ""
+    s = str(val).strip()
+    if s == "":
+        return ""
+    if "blended" in s.lower():
+        return "Blended (variable)"
+    s = s.replace(" ", "")
+    if s.endswith("%"):
+        s_num = s[:-1]
+    else:
+        s_num = s
+    try:
+        n = float(s_num)
+        return f"{round(n):.0f}%"
+    except Exception:
+        return s
+
+
+def apply_ccms_business_rule_validation(ws, rng_after, rng_before, rule_map: dict, header_rows: int = 1,
+                                       seg_col_offset: int = 0, lgd_col_offset: int = 2):
+    """
+    Apply Business Rule validation to CCMS pivot tables.
+
+    Color logic on LGD cells (Average of FinalLGDRate) only:
+      - If pivot LGD != business rule LGD => light red
+      - Else if After vs Before LGD differs => light yellow
+      - Else => light green
+
+    Segment 97 has rule 'Blended (variable)' => treated as always OK (green/yellow based on After vs Before).
+    """
+    a_top, a_left, a_bottom, a_right = rng_after
+    b_top, b_left, b_bottom, b_right = rng_before
+
+    n_rows = min(a_bottom - a_top + 1, b_bottom - b_top + 1)
+
+    # iterate data rows (skip header row)
+    for r in range(header_rows, n_rows):
+        seg = _parse_segment_id(ws.cell(a_top + r, a_left + seg_col_offset).value)
+        if seg is None:
+            continue
+
+        # get expected rule
+        expected = rule_map.get(seg)
+        if expected is None:
+            # No rule for this segment, skip business-rule validation
+            continue
+
+        expected_norm = _norm_percent_str(expected)
+
+        # current values from After and Before
+        a_cell = ws.cell(a_top + r, a_left + lgd_col_offset)
+        b_cell = ws.cell(b_top + r, b_left + lgd_col_offset)
+
+        a_val_norm = _norm_percent_str(a_cell.value)
+        b_val_norm = _norm_percent_str(b_cell.value)
+
+        # rule check
+        blended = (expected_norm == "Blended (variable)")
+        a_ok = True if blended else (a_val_norm == expected_norm)
+        b_ok = True if blended else (b_val_norm == expected_norm)
+
+        # after-before check
+        ab_same = (a_val_norm == b_val_norm)
+
+        # fill for After LGD cell
+        if not a_ok:
+            a_cell.fill = RULE_DIFF_FILL
+        else:
+            a_cell.fill = MATCH_FILL if ab_same else DIFF_FILL
+
+        # fill for Before LGD cell
+        if not b_ok:
+            b_cell.fill = RULE_DIFF_FILL
+        else:
+            b_cell.fill = MATCH_FILL if ab_same else DIFF_FILL
+
+
 def build_validation_excel(
     out_file: str,
     sheet_name: str,
@@ -542,7 +610,20 @@ def build_validation_excel(
     before_tables: list,
     after_section_labels: list,
     before_section_labels: list,
+    rule_checks: list | None = None,
 ):
+    """
+    Build excel with After and Before blocks, compare tables, apply borders.
+
+    rule_checks: optional list of rule check configs, each dict:
+      {
+        'table_index': int,           # index of pivot table in after_tables/before_tables
+        'rule_map': dict,             # {segment_id:int -> '60%'}
+        'seg_col_offset': int,        # default 0
+        'lgd_col_offset': int,        # default 2
+        'header_rows': int            # default 1
+      }
+    """
     out_path = BASE_DIR / out_file
     wb = open_or_create_and_clear(out_path, sheet_name)
     ws = wb[sheet_name]
@@ -557,16 +638,22 @@ def build_validation_excel(
     write_title(ws, TITLE_ROW, left_start_col, "After_Run Results")
     write_title(ws, TITLE_ROW, right_start_col, "Before_Run Results")
 
+    # pick reference rows
     if len(after_tables) == 2:
         ref_rows = REF_LABEL_ROWS_2
     elif len(after_tables) == 3:
         ref_rows = REF_LABEL_ROWS_3
-    else:
+    elif len(after_tables) == 4:
         ref_rows = REF_LABEL_ROWS_4
+    elif len(after_tables) == 5:
+        ref_rows = REF_LABEL_ROWS_5
+    else:
+        ref_rows = []
 
     after_ranges = []
     before_ranges = []
 
+    # After block
     prev_bottom = 0
     for i, df in enumerate(after_tables):
         desired_label_row = ref_rows[i] if i < len(ref_rows) else (prev_bottom + 1 + ROW_GAP_BETWEEN_TABLES)
@@ -577,6 +664,7 @@ def build_validation_excel(
         after_ranges.append(rng)
         prev_bottom = rng[2]
 
+    # Before block
     prev_bottom = 0
     for i, df in enumerate(before_tables):
         desired_label_row = ref_rows[i] if i < len(ref_rows) else (prev_bottom + 1 + ROW_GAP_BETWEEN_TABLES)
@@ -587,14 +675,35 @@ def build_validation_excel(
         before_ranges.append(rng)
         prev_bottom = rng[2]
 
+    # Run-to-run compare
     for i in range(min(len(after_ranges), len(before_ranges))):
         compare_and_color(ws, after_ranges[i], before_ranges[i])
 
+    # Apply rule checks (override LGD cells only)
+    if rule_checks:
+        for cfg in rule_checks:
+            idx = cfg.get('table_index')
+            if idx is None:
+                continue
+            if idx >= len(after_ranges) or idx >= len(before_ranges):
+                continue
+            apply_ccms_business_rule_validation(
+                ws,
+                after_ranges[idx],
+                before_ranges[idx],
+                cfg.get('rule_map', {}),
+                header_rows=cfg.get('header_rows', 1),
+                seg_col_offset=cfg.get('seg_col_offset', 0),
+                lgd_col_offset=cfg.get('lgd_col_offset', 2),
+            )
+
+    # Borders + center alignment in table ranges
     for rng in after_ranges:
         apply_table_cell_borders(ws, rng)
     for rng in before_ranges:
         apply_table_cell_borders(ws, rng)
 
+    # Autosize
     last_row = max(after_ranges[-1][2], before_ranges[-1][2]) if after_ranges and before_ranges else ws.max_row
     autosize_columns(ws, left_start_col, left_start_col + block_width - 1, 1, last_row)
     autosize_columns(ws, right_start_col, right_start_col + block_width - 1, 1, last_row)
@@ -621,7 +730,7 @@ def labels_cnb(after=True):
 
 
 def labels_ccms(after=True):
-    # Pivot must be last among run outputs, but business rule table is appended after pivot
+    # Pivot is last among run outputs; business rule table comes after pivot
     if after:
         return [
             "After Run - Error Summary CCMS Out File",
@@ -640,7 +749,7 @@ def labels_ccms(after=True):
 
 
 def labels_cms(after=True):
-    # Pivot must be last (CMS business rule will be added later)
+    # Pivot is last (CMS business rule to be added later)
     if after:
         return [
             "After Run - Error Summary CMS Out File",
@@ -711,7 +820,7 @@ def main():
         )
         print("✅ Generated CNB_Validation.xlsx")
 
-    # CCMS (add Business Rule table after pivot)
+    # CCMS: include Business Rule table AND validate pivot vs rule with red/green, while keeping yellow for run diffs
     if can_generate(CCMS_OUTER_PREFIX, "CCMS_Validation.xlsx"):
         df_ar_ccms_es, df_ar_ccms_sc, df_ar_ccms_scc = load_psv_dfs_from_run(
             AFTER_DIR, CCMS_OUTER_PREFIX, CCMS_INNER_OUT_PREFIX, ccms_list
@@ -735,8 +844,8 @@ def main():
 
         # Business rule table (same on both sides)
         df_rule_ccms_disp = df_with_header_row(business_rule_ccms_df())
+        rule_map = business_rule_ccms_map()
 
-        # Order: Error Summary, Summary, Summary Count, Facility Pivot, Business Rule
         build_validation_excel(
             out_file="CCMS_Validation.xlsx",
             sheet_name="CCMS_Validation",
@@ -744,10 +853,17 @@ def main():
             before_tables=[df_br_ccms_es, df_br_ccms_sc, df_br_ccms_scc, df_br_facility_ccms_out_pt_disp, df_rule_ccms_disp],
             after_section_labels=labels_ccms(after=True),
             before_section_labels=labels_ccms(after=False),
+            rule_checks=[{
+                'table_index': 3,      # Facility pivot table index in the above lists
+                'rule_map': rule_map,
+                'header_rows': 1,
+                'seg_col_offset': 0,
+                'lgd_col_offset': 2,
+            }]
         )
         print("✅ Generated CCMS_Validation.xlsx")
 
-    # CMS (business rule will be added later; pivot remains last)
+    # CMS (business rule validation will be added later; run comparison remains)
     if can_generate(COMM_OUTER_PREFIX, "CMS_Validation.xlsx"):
         df_ar_cms_es, df_ar_cms_sc, df_ar_cms_scc = load_psv_dfs_from_run(
             AFTER_DIR, COMM_OUTER_PREFIX, [CMS_INNER_OUT_PREFIX, ESN_INNER_OUT_PREFIX], cms_list
@@ -769,7 +885,6 @@ def main():
         df_ar_facility_cms_out_pt_disp = df_with_header_row(df_ar_facility_cms_out_pt)
         df_br_facility_cms_out_pt_disp = df_with_header_row(df_br_facility_cms_out_pt)
 
-        # Order: Error Summary, Summary, Summary Count, Facility (pivot last)
         build_validation_excel(
             out_file="CMS_Validation.xlsx",
             sheet_name="CMS_Validation",
